@@ -40,10 +40,12 @@ uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-di
 - `/review` searches and synthesizes literature. It writes a research brief, literature review, evidence map, and research gaps under `bib/`.
 - `/idea` generates candidate ideas, stress-tests novelty and feasibility, and writes the selected direction under `idea/FINAL_IDEA.md`. It may use targeted literature search but does not create the experiment plan.
 - `/plan` turns `FINAL_IDEA` or a directly supplied research objective into `plan/RESEARCH_BLUEPRINT.md`, `plan/EXPERIMENT_PLAN.md`, and `plan/EXECUTION_CHECKLIST.md`.
-- `/rebuttal` owns peer-review triage, rebuttal drafting, and revision planning under `rebuttal/`.
+- `/rebuttal` requires both a completed paper and reviewer comments. It freezes those inputs, maps each comment to paper sections/claims/evidence, selects response strategies, drafts point-by-point replies, and writes a concrete revision plan under `rebuttal/`.
 - `/code`, `/fig`, `/write`, `/present`, and `/wiki` continue implementation planning, figure production, paper drafting, presentation generation, and persistent research memory.
 
 Each command can run independently. When prior `/review` or `/idea` tasks exist in the same session, downstream commands prioritize their evidence map, research gaps, final idea, and research contract as handoff context.
+
+For `/rebuttal`, upload the completed paper and reviewer comments in the same session. Reviewer files whose names contain `review`, `reviewer`, `审稿`, or `评审` are routed to `rebuttal/uploads/`; paper files remain under `paper/uploads/`. Missing either input fails validation before model generation. Explicit `--paper` and `--review` paths can override automatic selection; workspace fallback accepts only filenames clearly marked as final/accepted/终稿/定稿.
 
 ## Presentation workflow
 
@@ -64,7 +66,7 @@ Each command can run independently. When prior `/review` or `/idea` tasks exist 
 
 - `POST /api/session/files` accepts multipart uploads with `files`, optional `session_id`, optional `user_id`, and `target`.
 - Each upload response contains an `upload_batch_id`; `/present` uses the latest batch when source scope is automatic or `attachments`.
-- `target=auto` routes images to `figures/uploads/`, paper documents to `paper/uploads/`, presentations to `presentation/uploads/`, bibliography files to `bib/uploads/`, code to `code/uploads/`, and other files to `Content/uploads/`.
+- `target=auto` routes reviewer-comment documents to `rebuttal/uploads/`, images to `figures/uploads/`, paper documents to `paper/uploads/`, presentations to `presentation/uploads/`, bibliography files to `bib/uploads/`, code to `code/uploads/`, and other files to `Content/uploads/`.
 - A standard directory name can be passed as `target` to override automatic classification.
 - Upload limits are configured with `UPLOAD_MAX_FILES` and `UPLOAD_MAX_FILE_MB`.
 

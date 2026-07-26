@@ -88,19 +88,26 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["/rebuttal + reviewer comments"] --> B["Review Triage"]
-    B --> B1["rebuttal/REVIEW_TRIAGE.md"]
-    B1 --> C{"Mutually exclusive response strategies?"}
-    C -->|Yes| D["Rebuttal Direction Approval"]
-    D -->|Revise| B
-    D -->|Approve| E["Rebuttal Draft"]
-    C -->|No| E
-    E --> E1["rebuttal/REBUTTAL_DRAFT.md"]
-    E1 --> F["Revision Plan"]
-    F --> F1["rebuttal/REVISION_PLAN.md"]
+    A["/rebuttal + completed paper + reviewer comments"] --> B{"Both input classes available?"}
+    B -->|No| C["Fail with explicit missing-input message"]
+    B -->|Yes| D["Freeze paper/review SourceSet"]
+    D --> D1["rebuttal/REBUTTAL_INPUTS.md"]
+    D --> D2["Content/REBUTTAL_SOURCE_SELECTION.json"]
+    D1 --> E["Map every comment to paper section, claim, figure, table, and evidence"]
+    E --> E1["rebuttal/REVIEW_TO_PAPER_MAP.md"]
+    E1 --> F["Response Strategy"]
+    F --> F1["rebuttal/RESPONSE_STRATEGY.md"]
+    F1 --> G{"Mutually exclusive unresolved strategies?"}
+    G -->|Yes| H["Rebuttal Strategy Decision"]
+    H -->|Revise| F
+    H -->|Approve| I["Point-by-point Rebuttal Draft"]
+    G -->|No| I
+    I --> I1["rebuttal/REBUTTAL_DRAFT.md"]
+    I1 --> J["Section-level Revision Plan"]
+    J --> J1["rebuttal/REVISION_PLAN.md"]
 ```
 
-The former peer-review behavior of `/review` now belongs to `/rebuttal`. `/auto-review-loop` and `/review-response` route to `/rebuttal` for compatibility.
+`/rebuttal` does not search for literature and does not infer a manuscript from the objective. Input priority is explicit `--paper`/`--review` paths, then the latest matching upload batch, then the newest final-paper material under `paper/` and review material under `rebuttal/uploads/`. The SourceSet is frozen at task start. A checkpoint appears only when evidence cannot resolve two or more genuinely mutually exclusive response strategies. `/auto-review-loop` and `/review-response` route to `/rebuttal` for compatibility.
 
 ## `/present`: deck production
 

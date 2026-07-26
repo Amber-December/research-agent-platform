@@ -263,19 +263,41 @@ Search, organize, and synthesize literature evidence for idea discovery and rese
 
 ## /rebuttal - Review Response and Rebuttal Workflow
 
-Triage peer-review comments, draft rebuttals, and produce a concrete revision plan.
+Analyze a completed paper against reviewer comments, draft traceable responses, and produce a concrete revision plan.
 
-### Review Triage (`review_triage`)
+### Rebuttal Intake (`rebuttal_intake`)
 
-- Artifact: `rebuttal/REVIEW_TRIAGE.md`
-- Kind: `review`
-- HITL: `True`
+- Artifact: `rebuttal/REBUTTAL_INPUTS.md`
+- Kind: `manifest`
+- HITL: `False`
 - ARIS skills:
-  - `skills/skills-codex/auto-review-loop/SKILL.md`
   - `skills/skills-codex/research-review/SKILL.md`
   - `skills/skills-codex/rebuttal/SKILL.md`
-  - `skills/skills-codex/kill-argument/SKILL.md`
   - `skills/skills-codex/integrity-forensics/SKILL.md`
+  - `skills/skills-codex/paper-claim-audit/SKILL.md`
+  - `skills/skills-codex/citation-audit/SKILL.md`
+
+### Review to Paper Map (`review_to_paper_map`)
+
+- Artifact: `rebuttal/REVIEW_TO_PAPER_MAP.md`
+- Kind: `review`
+- HITL: `False`
+- ARIS skills:
+  - `skills/skills-codex/research-review/SKILL.md`
+  - `skills/skills-codex/rebuttal/SKILL.md`
+  - `skills/skills-codex/integrity-forensics/SKILL.md`
+  - `skills/skills-codex/paper-claim-audit/SKILL.md`
+  - `skills/skills-codex/citation-audit/SKILL.md`
+  - `skills/skills-codex/experiment-audit/SKILL.md`
+
+### Response Strategy (`response_strategy`)
+
+- Artifact: `rebuttal/RESPONSE_STRATEGY.md`
+- Kind: `review`
+- HITL: `True`, only for two or more unresolved mutually exclusive strategies
+- ARIS skills:
+  - `skills/skills-codex/rebuttal/SKILL.md`
+  - `skills/skills-codex/kill-argument/SKILL.md`
   - `skills/skills-codex/experiment-audit/SKILL.md`
   - `skills/skills-codex/paper-claim-audit/SKILL.md`
   - `skills/skills-codex/citation-audit/SKILL.md`

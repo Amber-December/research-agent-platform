@@ -69,6 +69,14 @@ class PresentationSourceConfig(BaseModel):
     selection_reason: str = ""
 
 
+class RebuttalSourceConfig(BaseModel):
+    paper_refs: list[str] = Field(default_factory=list)
+    review_refs: list[str] = Field(default_factory=list)
+    paper_selection_reason: str = ""
+    review_selection_reason: str = ""
+    upload_batch_ids: list[str] = Field(default_factory=list)
+
+
 class CloudWorkspaceState(BaseModel):
     provider: str = "seafile"
     status: CloudSyncStatus = "disabled"
@@ -116,6 +124,7 @@ class TaskRun(BaseModel):
     progress_log: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     presentation_source: PresentationSourceConfig | None = None
+    rebuttal_source: RebuttalSourceConfig | None = None
 
 
 class ChatSession(BaseModel):

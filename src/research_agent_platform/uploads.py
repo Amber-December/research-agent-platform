@@ -39,6 +39,16 @@ CODE_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
+REVIEW_FILENAME_TERMS = (
+    "review",
+    "reviewer",
+    "referee",
+    "decision_letter",
+    "审稿",
+    "评审",
+    "审阅意见",
+    "修改意见",
+)
 
 
 def normalize_upload_target(target: str) -> str:
@@ -52,6 +62,9 @@ def classify_upload(filename: str, target: str = "auto") -> str:
     normalized_target = normalize_upload_target(target)
     if normalized_target != "auto":
         return normalized_target
+    lowered_name = Path(filename).stem.lower()
+    if any(term in lowered_name for term in REVIEW_FILENAME_TERMS):
+        return "rebuttal"
     extension = Path(filename).suffix.lower()
     if extension in IMAGE_EXTENSIONS:
         return "figures"

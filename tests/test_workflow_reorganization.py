@@ -32,7 +32,9 @@ def test_reorganized_workflow_boundaries():
         "execution_checklist",
     ]
     assert [stage.name for stage in workflows["/rebuttal"].stage_definitions] == [
-        "review_triage",
+        "rebuttal_intake",
+        "review_to_paper_map",
+        "response_strategy",
         "rebuttal_draft",
         "revision_plan",
     ]

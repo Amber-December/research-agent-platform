@@ -542,51 +542,104 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
         "/rebuttal": WorkflowDefinition(
             command="/rebuttal",
             title="Review Response and Rebuttal Workflow",
-            description="Triage peer-review comments, draft rebuttals, and produce a concrete revision plan.",
+            description="Analyze a completed paper against reviewer comments, draft traceable responses, and plan the revision.",
             stage_definitions=[
                 StageDefinition(
-                    name="review_triage",
-                    title="Review Triage",
-                    instruction="Parse the peer reviews into concrete blockers, major concerns, minor issues, evidence gaps, and the minimum change set required to respond well. Identify which points need new experiments, wording changes, or direct rebuttal. Use Decision Required only for mutually exclusive response strategies that the user must select; otherwise write None.",
-                    artifact_path="rebuttal/REVIEW_TRIAGE.md",
+                    name="rebuttal_intake",
+                    title="Rebuttal Intake",
+                    instruction="Freeze and validate the completed-paper and reviewer-comment SourceSet. This stage is generated deterministically by the platform and must not infer missing inputs.",
+                    artifact_path="rebuttal/REBUTTAL_INPUTS.md",
+                    artifact_kind="manifest",
+                    required_sections=[
+                        "Validation",
+                        "Completed Paper",
+                        "Reviewer Comments",
+                        "Required Analysis",
+                    ],
+                    skill_paths=_skills(
+                        "research-review",
+                        "rebuttal",
+                        "integrity-forensics",
+                        "paper-claim-audit",
+                        "citation-audit",
+                    ),
+                ),
+                StageDefinition(
+                    name="review_to_paper_map",
+                    title="Review to Paper Map",
+                    instruction=(
+                        "Parse every reviewer comment without merging distinct requests. Map each comment to the exact paper "
+                        "section, current claim or wording, figure/table/evidence, and identified gap. Record whether the paper "
+                        "already addresses the point, partially addresses it, contradicts it, or lacks evidence. Use stable "
+                        "reviewer and comment IDs that later stages must preserve."
+                    ),
+                    artifact_path="rebuttal/REVIEW_TO_PAPER_MAP.md",
                     artifact_kind="review",
                     required_sections=[
-                        "Review Summary",
-                        "Critical Blockers",
-                        "Major Concerns",
-                        "Minor Concerns",
-                        "Minimum Fixes",
-                        "Evidence Gaps",
-                        "Response Strategy",
-                        "Questions for Human Review",
+                        "Reviewer and Comment Index",
+                        "Comment to Section Map",
+                        "Claim and Evidence Map",
+                        "Figure and Table Map",
+                        "Unaddressed Evidence Gaps",
+                        "Traceability Checks",
+                    ],
+                    skill_paths=_skills(
+                        "research-review",
+                        "rebuttal",
+                        "integrity-forensics",
+                        "paper-claim-audit",
+                        "citation-audit",
+                        "experiment-audit",
+                    ),
+                ),
+                StageDefinition(
+                    name="response_strategy",
+                    title="Response Strategy",
+                    instruction=(
+                        "Choose a response strategy for every mapped comment: accept, partially accept, clarify, respectfully "
+                        "disagree with evidence, or add experiments/analysis. Recommend one default path and explain the evidence "
+                        "needed. Under Decision Required, write None unless two or more genuinely mutually exclusive strategies "
+                        "cannot be resolved from the paper and reviews and require the author to choose."
+                    ),
+                    artifact_path="rebuttal/RESPONSE_STRATEGY.md",
+                    artifact_kind="review",
+                    required_sections=[
+                        "Strategy by Comment",
+                        "Accepted and Partially Accepted Points",
+                        "Clarifications and Evidence-Based Disagreements",
+                        "New Experiments or Analysis",
+                        "Risks and Dependencies",
                         "Decision Required",
                     ],
                     skill_paths=_skills(
-                        "auto-review-loop",
-                        "research-review",
                         "rebuttal",
                         "kill-argument",
-                        "integrity-forensics",
                         "experiment-audit",
                         "paper-claim-audit",
                         "citation-audit",
                     ),
                     hitl=True,
-                    checkpoint_title="Rebuttal Direction Approval",
+                    checkpoint_title="Rebuttal Strategy Decision",
                 ),
                 StageDefinition(
                     name="rebuttal_draft",
                     title="Rebuttal Draft",
-                    instruction="Write a reviewer-by-reviewer rebuttal draft that is direct, evidence-based, and honest about open issues. Separate accepted issues, partial agreement, and rebuttal points so the response is easy to review and revise.",
+                    instruction=(
+                        "Write a reviewer-by-reviewer, comment-by-comment rebuttal using the stable IDs in the map. Quote or "
+                        "faithfully restate each comment, answer it directly, cite the relevant current paper location and "
+                        "evidence, and state the exact manuscript change or additional experiment. Never claim a revision or "
+                        "result that does not exist; label planned changes as commitments."
+                    ),
                     artifact_path="rebuttal/REBUTTAL_DRAFT.md",
                     artifact_kind="review",
                     required_sections=[
-                        "Reviewer Summary",
                         "Opening Summary",
-                        "Point-by-Point Responses",
-                        "Accepted Changes",
-                        "Committed Changes",
-                        "Unresolved Limits",
+                        "Reviewer-by-Reviewer Responses",
+                        "Comment-by-Comment Responses",
+                        "Paper Locations and Evidence",
+                        "Committed Manuscript Changes",
+                        "Committed Experiments or Analysis",
+                        "Remaining Limitations",
                     ],
                     skill_paths=_skills(
                         "rebuttal",
@@ -599,15 +652,21 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                 StageDefinition(
                     name="revision_plan",
                     title="Revision Plan",
-                    instruction="Turn the triage and rebuttal into a concrete revision execution plan with ordered tasks, owners, dependencies, and evidence needed to close the loop.",
+                    instruction=(
+                        "Turn the review-to-paper map, selected response strategies, and rebuttal draft into an executable "
+                        "revision plan. Identify the exact manuscript file and section, text/claim change, experiment or "
+                        "analysis, figure/table update, owner, dependency, priority, and verification needed for every comment."
+                    ),
                     artifact_path="rebuttal/REVISION_PLAN.md",
                     artifact_kind="plan",
                     required_sections=[
-                        "Revision Tasks",
+                        "Comment Coverage Matrix",
+                        "Manuscript Section Changes",
+                        "Experiment and Analysis Tasks",
+                        "Figure and Table Updates",
                         "Owners",
                         "Dependencies",
                         "Priority",
-                        "Artifact Updates",
                         "Verification Checklist",
                     ],
                     skill_paths=_skills(

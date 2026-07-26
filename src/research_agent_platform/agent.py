@@ -43,6 +43,11 @@ from .presentation import (
     speaker_notes_to_json,
     template_manifest,
 )
+from .rebuttal import (
+    RebuttalInputError,
+    rebuttal_inputs_markdown,
+    resolve_rebuttal_source_config,
+)
 from .router.intent import RouteDecision, is_approval_message, is_stop_message, route_message
 from .state.store import StateStore
 from .upstream import generate_image, generate_text
@@ -322,6 +327,22 @@ class ResearchAgentService:
                 session.upload_batches,
                 source_limit=config.presentation_source_limit,
             )
+        if task.command == "/rebuttal":
+            try:
+                task.rebuttal_source = resolve_rebuttal_source_config(
+                    task.objective,
+                    task_root,
+                    session.upload_batches,
+                )
+            except RebuttalInputError as exc:
+                task.status = "failed"
+                task.error = str(exc)
+                task.summary = str(exc)
+                self._log_progress(task, f"Rebuttal input validation failed: {exc}")
+                session.active_task_id = None
+                self.store.save_task(task)
+                self.store.save_session(session)
+                return self._build_reply(task, text=str(exc))
         self._log_progress(task, f"已路由到 {route.command} | 来源: {route.source} | 原因: {route.reason}")
         session.active_task_id = task.task_id
         self.store.save_task(task)
@@ -451,6 +472,19 @@ class ResearchAgentService:
         support_artifacts, support_context = await self._prepare_stage_support(task, stage)
         for artifact in support_artifacts:
             task.artifacts.append(artifact)
+        if task.command == "/rebuttal" and stage.name == "rebuttal_intake":
+            if task.rebuttal_source is None:
+                raise RebuttalInputError("/rebuttal input SourceSet is missing.")
+            content = rebuttal_inputs_markdown(task.rebuttal_source)
+            artifact = self._write_text(
+                task,
+                stage.artifact_path,
+                content,
+                kind=stage.artifact_kind,
+                description=f"{workflow.title} / {stage.title}",
+            )
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
         prompt = self._build_stage_prompt(task, workflow, stage, revision_feedback)
         if support_context:
             prompt["user"] = support_context + "\n" + prompt["user"]
@@ -524,6 +558,12 @@ class ResearchAgentService:
             support_artifacts.extend(presentation_artifacts)
             if presentation_context:
                 support_context_parts.append(presentation_context)
+            return support_artifacts, "\n\n".join(support_context_parts)
+        if task.command == "/rebuttal":
+            rebuttal_artifacts, rebuttal_context = self._prepare_rebuttal_support(task)
+            support_artifacts.extend(rebuttal_artifacts)
+            if rebuttal_context:
+                support_context_parts.append(rebuttal_context)
             return support_artifacts, "\n\n".join(support_context_parts)
         if task.command not in {"/review", "/idea"}:
             return support_artifacts, "\n\n".join(support_context_parts)
@@ -668,6 +708,72 @@ class ResearchAgentService:
             "- Paper mode treats final artifacts in paper/ as authoritative and follows a complete paper-talk arc.\n\n"
             f"Available original assets:\n{asset_context or '- None'}\n\n"
             f"Selected evidence:\n{evidence.text or 'No readable selected evidence found; rely only on the user objective.'}"
+        )
+        return artifacts, context
+
+    def _prepare_rebuttal_support(self, task: TaskRun) -> tuple[list, str]:
+        workspace_root = Path(task.artifact_root)
+        source_config = task.rebuttal_source
+        if source_config is None:
+            session = self.store.load_session(task.session_id)
+            source_config = resolve_rebuttal_source_config(
+                task.objective,
+                workspace_root,
+                session.upload_batches if session else (),
+            )
+            task.rebuttal_source = source_config
+            self.store.save_task(task)
+
+        paper_evidence = collect_workspace_evidence(
+            workspace_root,
+            "paper",
+            limit=18000,
+            source_refs=source_config.paper_refs,
+        )
+        review_evidence = collect_workspace_evidence(
+            workspace_root,
+            "stage",
+            limit=18000,
+            source_refs=source_config.review_refs,
+        )
+        selection = {
+            "task_id": task.task_id,
+            **source_config.model_dump(),
+            "paper_files_read": list(paper_evidence.files),
+            "review_files_read": list(review_evidence.files),
+        }
+        selection_json = json.dumps(selection, ensure_ascii=False, indent=2)
+        selection_path = workspace_root / "Content" / "REBUTTAL_SOURCE_SELECTION.json"
+        artifacts: list = []
+        if (
+            not selection_path.exists()
+            or selection_path.read_text(encoding="utf-8", errors="ignore") != selection_json
+        ):
+            artifacts.append(
+                self._write_text(
+                    task,
+                    "Content/REBUTTAL_SOURCE_SELECTION.json",
+                    selection_json,
+                    kind="note",
+                    description="Frozen completed-paper and reviewer-comment sources for /rebuttal.",
+                )
+            )
+
+        context = (
+            "Rebuttal SourceSet contract:\n"
+            "- The completed paper and reviewer comments below are both required and have been frozen for this task.\n"
+            "- Analyze reviewer comments against the actual paper. Do not answer from the task objective alone.\n"
+            "- Preserve reviewer-by-reviewer and comment-by-comment traceability.\n"
+            "- Every proposed response must point to a paper section, claim, figure, table, evidence item, or an explicit gap.\n"
+            "- Distinguish current paper text, proposed response language, promised revision, and new experiment needs.\n\n"
+            "Completed paper sources:\n"
+            + "\n".join(f"- `{path}`" for path in source_config.paper_refs)
+            + "\n\nCompleted paper content:\n"
+            + (paper_evidence.text or "No readable paper text could be extracted from the frozen files.")
+            + "\n\nReviewer-comment sources:\n"
+            + "\n".join(f"- `{path}`" for path in source_config.review_refs)
+            + "\n\nReviewer comments:\n"
+            + (review_evidence.text or "No readable reviewer text could be extracted from the frozen files.")
         )
         return artifacts, context
 
