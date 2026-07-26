@@ -116,6 +116,7 @@ CHAT_PAGE = """<!doctype html>
             <h3>云端工作区</h3>
             <div id="cloud-status" class="status">未启用云盘同步。</div>
             <div id="cloud-links" class="cloud-links"></div>
+            <button id="cloud-sync" class="button secondary" type="button" title="同步当前会话到云盘" aria-label="同步当前会话到云盘">&#8635;</button>
           </div>
           <div class="section">
             <h3>审核点</h3>
@@ -185,6 +186,7 @@ CHAT_PAGE = """<!doctype html>
     const statusEl = document.getElementById("status");
     const cloudStatusEl = document.getElementById("cloud-status");
     const cloudLinksEl = document.getElementById("cloud-links");
+    const cloudSyncBtn = document.getElementById("cloud-sync");
     const checkpointEl = document.getElementById("checkpoint");
     const artifactsEl = document.getElementById("artifacts");
     const progressEl = document.getElementById("progress");
@@ -274,6 +276,26 @@ CHAT_PAGE = """<!doctype html>
       }
     }
 
+    async function syncCloudWorkspace() {
+      const sessionId = sessionInput.value.trim();
+      if (!sessionId) {
+        cloudStatusEl.textContent = "请先创建会话或上传文件。";
+        return;
+      }
+      cloudSyncBtn.disabled = true;
+      cloudStatusEl.textContent = "正在同步云端工作区...";
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/sync`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "云盘同步失败");
+        renderCloudWorkspace(data.cloud_workspace || {});
+      } catch (error) {
+        cloudStatusEl.textContent = error.message || "云盘同步失败";
+      } finally {
+        cloudSyncBtn.disabled = false;
+      }
+    }
+
     function renderCheckpoint(checkpoint) {
       checkpointEl.classList.remove("warning");
       if (!checkpoint) {
@@ -284,6 +306,8 @@ CHAT_PAGE = """<!doctype html>
       checkpointEl.textContent = checkpoint.prompt || checkpoint.title || "待审核";
       actionsEl.hidden = false;
     }
+
+    cloudSyncBtn.addEventListener("click", syncCloudWorkspace);
 
     function scheduleTaskPoll() {
       if (pollTimer || !currentTaskId) return;
@@ -691,6 +715,19 @@ async def api_upload_session_files(
         "upload_batch_id": upload_batch.upload_batch_id,
         "files": artifacts,
         "cloud_workspace": session.cloud_workspace.model_dump(),
+    }
+
+
+@app.post("/api/sessions/{session_id}/sync")
+async def api_sync_session_workspace(session_id: str) -> dict[str, Any]:
+    session = agent.store.load_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
+    cloud_workspace = await agent.sync_session_workspace(session)
+    return {
+        "session_id": session.session_id,
+        "workspace_root": session.workspace_root,
+        "cloud_workspace": cloud_workspace.model_dump(),
     }
 
 

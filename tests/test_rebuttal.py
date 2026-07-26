@@ -132,6 +132,20 @@ def test_rebuttal_maps_comments_to_paper_and_runs_without_routine_checkpoint(
                 "## New Experiments or Analysis\n- Robustness evaluation.\n\n"
                 "## Risks and Dependencies\n- Compute availability.\n\n## Decision Required\nNone."
             )
+        if "Current stage: Revised Manuscript" in user_prompt:
+            return (
+                "# Revised Paper\n\n## Abstract\nUpdated.\n\n## Introduction\nContext.\n\n"
+                "## Method\nMethod A is justified.\n\n## Experiments or Results\nTable 2 reports accuracy.\n\n"
+                "## Limitations\nRobustness remains planned.\n\n## Conclusion\nBounded conclusion.\n\n"
+                "## References\nExisting references.\n\n## Unresolved Author Inputs\n- R1.C1 robustness experiment."
+            )
+        if "Current stage: Revision Ledger" in user_prompt:
+            return (
+                "# Revision Ledger\n\n## Coverage Summary\n- R1.C1 covered.\n\n"
+                "## Comment Revision Ledger\n- R1.C1 | Status: planned | Experiments | robustness promised.\n\n"
+                "## Implemented Changes\n- R1.C1 method clarification.\n\n## Planned Changes\n- R1.C1 robustness.\n\n"
+                "## Unresolved Changes\n- None.\n\n## Author Verification\n- Verify R1.C1."
+            )
         return "# Rebuttal Artifact\n\n- R1.C1 remains traceable to Experiments and Table 2."
 
     monkeypatch.setattr(agent_module, "generate_text", generate_rebuttal)
@@ -150,6 +164,14 @@ def test_rebuttal_maps_comments_to_paper_and_runs_without_routine_checkpoint(
     assert selection["paper_files_read"] == ["paper/FINAL_PAPER.md"]
     assert selection["review_files_read"] == ["rebuttal/uploads/reviewer_comments.txt"]
     assert any("## Method" in prompt and "Reviewer 1, Comment 1" in prompt for prompt in prompts)
+    assert Path(task.artifact_root, "paper", "PAPER_REVISED_AFTER_REVIEW.md").exists()
+    assert Path(task.artifact_root, "rebuttal", "REVISION_LEDGER.md").exists()
+    closure = json.loads(
+        Path(task.artifact_root, "rebuttal", "REBUTTAL_CLOSURE_REPORT.json").read_text(encoding="utf-8")
+    )
+    assert closure["status"] == "pass"
+    assert closure["coverage"][0]["comment_id"] == "R1.C1"
+    assert closure["coverage"][0]["declared_revision_status"] == "planned"
 
 
 def test_rebuttal_checkpoints_only_for_mutually_exclusive_strategies(

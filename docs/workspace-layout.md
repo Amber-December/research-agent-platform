@@ -36,9 +36,9 @@ agent-workspace/
 - `idea/`: literature landscape, idea reports, novelty notes, research contracts.
 - `code/`: implementation plans, runbooks, local collaboration notes, scripts.
 - `figures/`: figure inventory, figure briefs, generated images, figure metadata.
-- `paper/`: paper plans, drafts, LaTeX, Word, PDF, compile logs.
+- `paper/`: frozen evidence map, paper plans, narrative report, first draft, self-review, evidence-preserving revised manuscripts, citation/delivery reports, LaTeX, Word, PDF, and compile logs.
 - `presentation/`: slide outlines, page content, speaker-note scripts, QA briefs, generated slide pages, and PPTX exports with native per-slide notes.
-- `rebuttal/`: uploaded reviewer comments, frozen input manifest, review-to-paper map, response strategy, rebuttal draft, and revision plan.
+- `rebuttal/`: uploaded reviewer comments, frozen input manifest, review-to-paper map, response strategy, rebuttal draft, revision plan, per-comment revision ledger, and closure report.
 - `wiki/`: reusable memory notes and knowledge digests.
 - `Content/`: session context, source indexes, human checkpoints, generation prompts, traceability metadata, and the artifact manifest used for stage reporting.
 - `logs/`: runtime logs and diagnostics.

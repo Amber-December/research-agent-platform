@@ -344,19 +344,49 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
         "/write": WorkflowDefinition(
             command="/write",
             title="Paper Writing Workflow",
-            description="Draft paper planning, evidence mapping, and submission-ready narrative assets.",
+            description="Freeze research evidence, draft and independently review the paper, revise it, and run delivery gates.",
             stage_definitions=[
+                StageDefinition(
+                    name="paper_evidence",
+                    title="Paper Evidence Contract",
+                    instruction=(
+                        "Freeze the writing SourceSet and extract stable evidence records with source paths, pages, evidence "
+                        "types, provenance, and excerpts. This stage is generated deterministically by the platform."
+                    ),
+                    artifact_path="paper/PAPER_EVIDENCE_MAP.json",
+                    artifact_kind="manifest",
+                    required_sections=[
+                        "Evidence ID",
+                        "Source Path",
+                        "Page",
+                        "Evidence Type",
+                        "Provenance",
+                        "Excerpt",
+                    ],
+                    skill_paths=_skills(
+                        "paper-claim-audit",
+                        "citation-audit",
+                        "result-to-claim",
+                    ),
+                ),
                 StageDefinition(
                     name="paper_plan",
                     title="Paper Plan",
-                    instruction="Produce a paper plan that can be executed immediately: target venue, core contribution, outline, claim-to-evidence map, missing evidence, figure/table needs, and a writing order that follows the strongest available facts. Put unresolved venue or story alternatives under Decision Required; otherwise write None and continue automatically.",
+                    instruction=(
+                        "Produce an executable paper plan from the frozen evidence contract: target venue, core contribution, "
+                        "outline, section responsibilities, paragraph jobs, claim-to-evidence IDs, missing evidence, figure/table "
+                        "needs, terminology, and writing order. Distinguish experimental papers from review articles. Put "
+                        "unresolved venue or story alternatives under Decision Required; otherwise write None."
+                    ),
                     artifact_path="paper/PAPER_PLAN.md",
                     artifact_kind="plan",
                     required_sections=[
                         "Target Story",
                         "Submission Target",
                         "Section Outline",
+                        "Section Responsibilities and Paragraph Jobs",
                         "Claim to Evidence Map",
+                        "Terminology and Claim Boundaries",
                         "Writing Risks",
                         "Questions for Human Review",
                         "Decision Required",
@@ -376,7 +406,11 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                 StageDefinition(
                     name="narrative_report",
                     title="Narrative Report",
-                    instruction="Write a narrative handoff document that a coauthor can use directly: problem, method, evidence, what is still missing, limitations, and how the current work should be framed honestly.",
+                    instruction=(
+                        "Write a narrative handoff document that a coauthor can use directly: problem, method, evidence IDs, "
+                        "results, contradictions, what is missing, limitations, and how the current work should be framed. "
+                        "Separate demonstrated results from intended contributions and future work."
+                    ),
                     artifact_path="paper/NARRATIVE_REPORT.md",
                     artifact_kind="report",
                     required_sections=[
@@ -384,6 +418,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Core Claim",
                         "Method Summary",
                         "Key Results",
+                        "Evidence and Citation Boundaries",
                         "Limitations",
                         "Open Gaps",
                     ],
@@ -399,7 +434,12 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                 StageDefinition(
                     name="draft_sections",
                     title="Draft Sections",
-                    instruction="Write a first-pass paper draft aligned with the approved outline and available evidence. Make claims traceable, keep placeholders honest, and include enough structure that a human can continue editing without re-deriving the story.",
+                    instruction=(
+                        "Write a complete first-pass paper aligned with the approved outline and frozen evidence. Use continuous "
+                        "prose rather than outline bullets, keep one controlling idea per paragraph, preserve supplied equations, "
+                        "numbers, tables, figures, and citations, and keep unsupported content as [AUTHOR INPUT NEEDED]. "
+                        "Do not invent bibliography entries or evidence."
+                    ),
                     artifact_path="paper/PAPER_DRAFT.md",
                     artifact_kind="report",
                     required_sections=[
@@ -422,6 +462,65 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "citation-audit",
                         "overleaf-sync",
                         "paper-compile",
+                        "claims-drafting",
+                    ),
+                ),
+                StageDefinition(
+                    name="paper_self_review",
+                    title="Paper Self Review",
+                    instruction=(
+                        "Independently audit PAPER_DRAFT.md against PAPER_EVIDENCE_MAP.json and PAPER_PLAN.md. Assign stable "
+                        "issue IDs and major/minor severity. Check argument, claim-evidence alignment, citation closure, coverage, "
+                        "structure, terminology, paragraph flow, overclaiming, contradictions, limitations, figure/table "
+                        "traceability, and venue requirements. Do not perform a new experiment or literature search."
+                    ),
+                    artifact_path="paper/PAPER_SELF_REVIEW.md",
+                    artifact_kind="review",
+                    required_sections=[
+                        "Quality Scores",
+                        "Major Issues",
+                        "Minor Issues",
+                        "Claim and Evidence Findings",
+                        "Citation Findings",
+                        "Structure and Venue Findings",
+                        "Revision Actions",
+                    ],
+                    skill_paths=_skills(
+                        "paper-claim-audit",
+                        "citation-audit",
+                        "research-review",
+                        "integrity-forensics",
+                        "experiment-audit",
+                    ),
+                ),
+                StageDefinition(
+                    name="paper_revision",
+                    title="Paper Revision",
+                    instruction=(
+                        "Revise PAPER_DRAFT.md using every issue in PAPER_SELF_REVIEW.md. Make the smallest evidence-supported "
+                        "change that resolves each issue, preserve facts, numbers, equations, citations, figure/table references, "
+                        "and provenance, and retain unresolved scientific gaps as [AUTHOR INPUT NEEDED]. Return the complete "
+                        "revised manuscript, not a change summary."
+                    ),
+                    artifact_path="paper/PAPER_REVISED.md",
+                    artifact_kind="report",
+                    required_sections=[
+                        "Title",
+                        "Abstract",
+                        "Introduction",
+                        "Related Work",
+                        "Method",
+                        "Experiments",
+                        "Limitations",
+                        "Conclusion",
+                        "References",
+                        "Unresolved Author Inputs",
+                    ],
+                    skill_paths=_skills(
+                        "paper-writing",
+                        "paper-write",
+                        "paper-claim-audit",
+                        "citation-audit",
                         "claims-drafting",
                     ),
                 ),
@@ -677,6 +776,64 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "citation-audit",
                         "paper-claim-audit",
                         "result-to-claim",
+                    ),
+                ),
+                StageDefinition(
+                    name="revised_manuscript",
+                    title="Revised Manuscript",
+                    instruction=(
+                        "Apply the response strategy and revision plan to the frozen completed paper. Return a complete revised "
+                        "manuscript while preserving supported facts, numbers, citations, equations, figures, and tables. "
+                        "Implement textual clarifications now. Do not fabricate promised experiments or results; mark unavailable "
+                        "changes as [AUTHOR INPUT NEEDED: Rn.Cn ...]."
+                    ),
+                    artifact_path="paper/PAPER_REVISED_AFTER_REVIEW.md",
+                    artifact_kind="report",
+                    required_sections=[
+                        "Title",
+                        "Abstract",
+                        "Introduction",
+                        "Method",
+                        "Experiments or Results",
+                        "Limitations",
+                        "Conclusion",
+                        "References",
+                        "Unresolved Author Inputs",
+                    ],
+                    skill_paths=_skills(
+                        "rebuttal",
+                        "paper-writing",
+                        "paper-write",
+                        "paper-claim-audit",
+                        "citation-audit",
+                    ),
+                ),
+                StageDefinition(
+                    name="revision_ledger",
+                    title="Revision Ledger",
+                    instruction=(
+                        "Compare the frozen paper, review-to-paper map, response strategy, rebuttal draft, revision plan, and "
+                        "revised manuscript. Produce one row per stable comment ID. Every row must include Status exactly as "
+                        "implemented, planned, or unresolved; paper location; original issue; response promise; actual manuscript "
+                        "change; evidence; and author verification needed. Do not claim implemented when the revised manuscript "
+                        "does not contain the change."
+                    ),
+                    artifact_path="rebuttal/REVISION_LEDGER.md",
+                    artifact_kind="review",
+                    required_sections=[
+                        "Coverage Summary",
+                        "Comment Revision Ledger",
+                        "Implemented Changes",
+                        "Planned Changes",
+                        "Unresolved Changes",
+                        "Author Verification",
+                    ],
+                    skill_paths=_skills(
+                        "rebuttal",
+                        "paper-claim-audit",
+                        "citation-audit",
+                        "integrity-forensics",
+                        "experiment-audit",
                     ),
                 ),
             ],

@@ -66,6 +66,9 @@ class AppConfig(BaseModel):
     presentation_source_limit: int = Field(
         default_factory=lambda: int(os.getenv("PRESENTATION_SOURCE_LIMIT", "40"))
     )
+    write_source_limit: int = Field(
+        default_factory=lambda: int(os.getenv("WRITE_SOURCE_LIMIT", "50"))
+    )
     upload_max_files: int = Field(
         default_factory=lambda: int(os.getenv("UPLOAD_MAX_FILES", "20"))
     )

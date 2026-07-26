@@ -32,6 +32,8 @@ GENERATED_REBUTTAL_FILES = {
     "RESPONSE_STRATEGY.md",
     "REBUTTAL_DRAFT.md",
     "REVISION_PLAN.md",
+    "REVISION_LEDGER.md",
+    "REBUTTAL_CLOSURE_REPORT.json",
 }
 
 
@@ -117,6 +119,155 @@ def rebuttal_inputs_markdown(config: RebuttalSourceConfig) -> str:
         "- Keep reviewer wording, paper wording, proposed response, and promised revision distinguishable.\n"
         "- Do not infer missing paper content or reviewer comments from the task objective.\n"
     )
+
+
+def build_rebuttal_closure_report(workspace_root: Path) -> dict:
+    artifact_paths = {
+        "map": "rebuttal/REVIEW_TO_PAPER_MAP.md",
+        "strategy": "rebuttal/RESPONSE_STRATEGY.md",
+        "response": "rebuttal/REBUTTAL_DRAFT.md",
+        "plan": "rebuttal/REVISION_PLAN.md",
+        "ledger": "rebuttal/REVISION_LEDGER.md",
+        "revised_manuscript": "paper/PAPER_REVISED_AFTER_REVIEW.md",
+    }
+    contents = {
+        name: _read(workspace_root / relative)
+        for name, relative in artifact_paths.items()
+    }
+    comment_ids = extract_comment_ids(contents["map"]) or extract_comment_ids(contents["response"])
+    coverage: list[dict] = []
+    for comment_id in comment_ids:
+        ledger_line = _line_for_comment(contents["ledger"], comment_id)
+        coverage.append(
+            {
+                "comment_id": comment_id,
+                "mapped": _contains_id(contents["map"], comment_id),
+                "strategy_present": _contains_id(contents["strategy"], comment_id),
+                "response_present": _contains_id(contents["response"], comment_id),
+                "revision_plan_present": _contains_id(contents["plan"], comment_id),
+                "ledger_present": bool(ledger_line),
+                "declared_revision_status": _declared_revision_status(ledger_line),
+            }
+        )
+    required_keys = (
+        "mapped",
+        "strategy_present",
+        "response_present",
+        "revision_plan_present",
+        "ledger_present",
+    )
+    incomplete = [
+        row["comment_id"] for row in coverage if not all(row[key] for key in required_keys)
+    ]
+    unresolved = [
+        row["comment_id"]
+        for row in coverage
+        if row["declared_revision_status"] in {"planned", "unresolved", "unknown"}
+    ]
+    findings = [
+        _closure_finding(
+            "comment_ids_detected",
+            bool(comment_ids),
+            "hard",
+            f"{len(comment_ids)} stable comment IDs detected.",
+        ),
+        _closure_finding(
+            "point_by_point_coverage",
+            not incomplete,
+            "hard",
+            "Incomplete IDs: " + ", ".join(incomplete)
+            if incomplete
+            else "Every ID crosses all response artifacts.",
+        ),
+        _closure_finding(
+            "revised_manuscript_exists",
+            bool(contents["revised_manuscript"].strip()),
+            "hard",
+            artifact_paths["revised_manuscript"],
+        ),
+        {
+            "check": "unresolved_or_planned_changes",
+            "status": "warning" if unresolved else "pass",
+            "severity": "soft",
+            "detail": "Author verification required for: " + ", ".join(unresolved)
+            if unresolved
+            else "No unresolved ledger status detected.",
+        },
+    ]
+    hard_violations = [
+        item for item in findings if item["severity"] == "hard" and item["status"] == "violated"
+    ]
+    return {
+        "status": "pass" if not hard_violations else "needs_attention",
+        "comment_count": len(comment_ids),
+        "hard_violations": len(hard_violations),
+        "coverage": coverage,
+        "findings": findings,
+        "artifact_paths": artifact_paths,
+        "verification_boundary": (
+            "This gate verifies identifier coverage and declared status. Semantic correctness, new experimental "
+            "results, exact manuscript edits, and reviewer satisfaction require author verification."
+        ),
+    }
+
+
+def extract_comment_ids(content: str) -> list[str]:
+    results: list[str] = []
+    patterns = (
+        r"\bR(?:eviewer)?\s*(\d+)\s*[.\-_:]?\s*C(?:omment)?\s*(\d+)\b",
+        r"\bR(\d+)\s*[.\-_:]\s*(\d+)\b",
+    )
+    for pattern in patterns:
+        for reviewer, comment in re.findall(pattern, content, re.I):
+            normalized = f"R{int(reviewer)}.C{int(comment)}"
+            if normalized not in results:
+                results.append(normalized)
+    return results
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
+
+
+def _contains_id(content: str, comment_id: str) -> bool:
+    return comment_id.lower() in content.lower()
+
+
+def _line_for_comment(content: str, comment_id: str) -> str:
+    normalized = comment_id.lower()
+    matches = [line.strip() for line in content.splitlines() if normalized in line.lower()]
+    return next(
+        (
+            line
+            for line in matches
+            if re.search(
+                r"\bstatus\b|implemented|planned|unresolved|已完成|已修改|已落实|待执行|计划|承诺|未解决|待确认",
+                line,
+                re.I,
+            )
+        ),
+        matches[0] if matches else "",
+    )
+
+
+def _declared_revision_status(line: str) -> str:
+    lowered = line.lower()
+    if any(term in lowered for term in ("implemented", "completed", "applied", "已完成", "已修改", "已落实")):
+        return "implemented"
+    if any(term in lowered for term in ("planned", "committed", "待执行", "计划", "承诺")):
+        return "planned"
+    if any(term in lowered for term in ("unresolved", "blocked", "无法", "未解决", "待确认")):
+        return "unresolved"
+    return "unknown"
+
+
+def _closure_finding(check: str, passed: bool, severity: str, detail: str) -> dict:
+    return {
+        "check": check,
+        "status": "pass" if passed else "violated",
+        "severity": severity,
+        "detail": detail,
+    }
 
 
 def _latest_batch_sources(

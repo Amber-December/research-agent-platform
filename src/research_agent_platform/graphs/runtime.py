@@ -248,6 +248,8 @@ class LangGraphWorkflowRuntime:
                 task.artifacts.extend(await self.service._write_figure_delivery_artifacts(task))
             if task.command == "/write":
                 task.artifacts.extend(await self.service._write_delivery_artifacts(task))
+            if task.command == "/rebuttal":
+                task.artifacts.extend(self.service._write_rebuttal_delivery_artifacts(task))
             if task.command == "/present":
                 await self.service._write_presentation_delivery_artifacts(task)
 

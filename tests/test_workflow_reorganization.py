@@ -37,6 +37,16 @@ def test_reorganized_workflow_boundaries():
         "response_strategy",
         "rebuttal_draft",
         "revision_plan",
+        "revised_manuscript",
+        "revision_ledger",
+    ]
+    assert [stage.name for stage in workflows["/write"].stage_definitions] == [
+        "paper_evidence",
+        "paper_plan",
+        "narrative_report",
+        "draft_sections",
+        "paper_self_review",
+        "paper_revision",
     ]
 
 

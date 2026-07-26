@@ -165,7 +165,17 @@ Design figure inventory and visual briefs.
 
 ## /write - Paper Writing Workflow
 
-Draft paper planning, evidence mapping, and submission-ready narrative assets.
+Freeze research evidence, draft and independently review the paper, revise it, and run delivery gates.
+
+### Paper Evidence Contract (`paper_evidence`)
+
+- Artifact: `paper/PAPER_EVIDENCE_MAP.json`
+- Kind: `manifest`
+- HITL: `False`
+- ARIS skills:
+  - `skills/skills-codex/paper-claim-audit/SKILL.md`
+  - `skills/skills-codex/citation-audit/SKILL.md`
+  - `skills/skills-codex/result-to-claim/SKILL.md`
 
 ### Paper Plan (`paper_plan`)
 
@@ -207,6 +217,30 @@ Draft paper planning, evidence mapping, and submission-ready narrative assets.
   - `skills/skills-codex/citation-audit/SKILL.md`
   - `skills/skills-codex/overleaf-sync/SKILL.md`
   - `skills/skills-codex/paper-compile/SKILL.md`
+  - `skills/skills-codex/claims-drafting/SKILL.md`
+
+### Paper Self Review (`paper_self_review`)
+
+- Artifact: `paper/PAPER_SELF_REVIEW.md`
+- Kind: `review`
+- HITL: `False`
+- ARIS skills:
+  - `skills/skills-codex/paper-claim-audit/SKILL.md`
+  - `skills/skills-codex/citation-audit/SKILL.md`
+  - `skills/skills-codex/research-review/SKILL.md`
+  - `skills/skills-codex/integrity-forensics/SKILL.md`
+  - `skills/skills-codex/experiment-audit/SKILL.md`
+
+### Paper Revision (`paper_revision`)
+
+- Artifact: `paper/PAPER_REVISED.md`
+- Kind: `report`
+- HITL: `False`
+- ARIS skills:
+  - `skills/skills-codex/paper-writing/SKILL.md`
+  - `skills/skills-codex/paper-write/SKILL.md`
+  - `skills/skills-codex/paper-claim-audit/SKILL.md`
+  - `skills/skills-codex/citation-audit/SKILL.md`
   - `skills/skills-codex/claims-drafting/SKILL.md`
 
 
@@ -263,7 +297,7 @@ Search, organize, and synthesize literature evidence for idea discovery and rese
 
 ## /rebuttal - Review Response and Rebuttal Workflow
 
-Analyze a completed paper against reviewer comments, draft traceable responses, and produce a concrete revision plan.
+Analyze a completed paper against reviewer comments, draft traceable responses, and plan the revision.
 
 ### Rebuttal Intake (`rebuttal_intake`)
 
@@ -294,7 +328,7 @@ Analyze a completed paper against reviewer comments, draft traceable responses, 
 
 - Artifact: `rebuttal/RESPONSE_STRATEGY.md`
 - Kind: `review`
-- HITL: `True`, only for two or more unresolved mutually exclusive strategies
+- HITL: `True`
 - ARIS skills:
   - `skills/skills-codex/rebuttal/SKILL.md`
   - `skills/skills-codex/kill-argument/SKILL.md`
@@ -327,6 +361,30 @@ Analyze a completed paper against reviewer comments, draft traceable responses, 
   - `skills/skills-codex/citation-audit/SKILL.md`
   - `skills/skills-codex/paper-claim-audit/SKILL.md`
   - `skills/skills-codex/result-to-claim/SKILL.md`
+
+### Revised Manuscript (`revised_manuscript`)
+
+- Artifact: `paper/PAPER_REVISED_AFTER_REVIEW.md`
+- Kind: `report`
+- HITL: `False`
+- ARIS skills:
+  - `skills/skills-codex/rebuttal/SKILL.md`
+  - `skills/skills-codex/paper-writing/SKILL.md`
+  - `skills/skills-codex/paper-write/SKILL.md`
+  - `skills/skills-codex/paper-claim-audit/SKILL.md`
+  - `skills/skills-codex/citation-audit/SKILL.md`
+
+### Revision Ledger (`revision_ledger`)
+
+- Artifact: `rebuttal/REVISION_LEDGER.md`
+- Kind: `review`
+- HITL: `False`
+- ARIS skills:
+  - `skills/skills-codex/rebuttal/SKILL.md`
+  - `skills/skills-codex/paper-claim-audit/SKILL.md`
+  - `skills/skills-codex/citation-audit/SKILL.md`
+  - `skills/skills-codex/integrity-forensics/SKILL.md`
+  - `skills/skills-codex/experiment-audit/SKILL.md`
 
 
 ## /present - Presentation Workflow

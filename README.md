@@ -40,12 +40,15 @@ uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-di
 - `/review` searches and synthesizes literature. It writes a research brief, literature review, evidence map, and research gaps under `bib/`.
 - `/idea` generates candidate ideas, stress-tests novelty and feasibility, and writes the selected direction under `idea/FINAL_IDEA.md`. It may use targeted literature search but does not create the experiment plan.
 - `/plan` turns `FINAL_IDEA` or a directly supplied research objective into `plan/RESEARCH_BLUEPRINT.md`, `plan/EXPERIMENT_PLAN.md`, and `plan/EXECUTION_CHECKLIST.md`.
-- `/rebuttal` requires both a completed paper and reviewer comments. It freezes those inputs, maps each comment to paper sections/claims/evidence, selects response strategies, drafts point-by-point replies, and writes a concrete revision plan under `rebuttal/`.
-- `/code`, `/fig`, `/write`, `/present`, and `/wiki` continue implementation planning, figure production, paper drafting, presentation generation, and persistent research memory.
+- `/write` freezes an attachment/session/workspace SourceSet, extracts stable evidence IDs, plans and drafts the paper, runs an independent self-review, produces an evidence-preserving revision, and writes deterministic citation/delivery reports before DOCX/PDF/TeX export.
+- `/rebuttal` requires both a completed paper and reviewer comments. It maps each comment to paper evidence, drafts point-by-point replies, produces a revised manuscript and revision ledger, then verifies comment-ID coverage in `REBUTTAL_CLOSURE_REPORT.json`.
+- `/code`, `/fig`, `/present`, and `/wiki` continue implementation planning, figure production, presentation generation, and persistent research memory.
 
 Each command can run independently. When prior `/review` or `/idea` tasks exist in the same session, downstream commands prioritize their evidence map, research gaps, final idea, and research contract as handoff context.
 
 For `/rebuttal`, upload the completed paper and reviewer comments in the same session. Reviewer files whose names contain `review`, `reviewer`, `审稿`, or `评审` are routed to `rebuttal/uploads/`; paper files remain under `paper/uploads/`. Missing either input fails validation before model generation. Explicit `--paper` and `--review` paths can override automatic selection; workspace fallback accepts only filenames clearly marked as final/accepted/终稿/定稿.
+
+For `/write`, `--source attachments|selected|session|workspace` is optional. Automatic mode combines the latest upload batch with ranked paper, figure, plan, idea, bibliography, context, log, and code materials. `Content/PAPER_SOURCE_SELECTION.json` freezes the boundary; `paper/PAPER_EVIDENCE_MAP.json` stores extracted source/page/provenance records. The final exports use `paper/PAPER_REVISED.md`, not the first draft.
 
 ## Presentation workflow
 
@@ -73,11 +76,13 @@ For `/rebuttal`, upload the completed paper and reviewer comments in the same se
 ## Optional Seafile cloud workspace
 
 - Set `CLOUD_SYNC_ENABLED=true` to mirror `agent-workspace/<user_id>/<session_id>/` to `SEAFILE_REMOTE_ROOT/<user_id>/<session_id>/`.
+- For Tsinghua Seafile, run `\.venv\Scripts\python.exe tools\configure_tsinghua_seafile.py` locally after changing any password previously sent through chat. The prompt hides the password, exchanges it for an API token, writes only the token to the ignored `.env`, and clears stored username/password fields.
 - The Agent creates the remote session directory when the workspace is initialized, then uploads changed files after every workflow stage, checkpoint, final delivery, and user upload.
 - `Content/CLOUD_SYNC.json` stores local file signatures so unchanged files are skipped on later syncs.
 - Configure an existing library with `SEAFILE_REPO_ID`, or let the connector find/create `SEAFILE_REPO_NAME` when the account permits it.
 - Prefer `SEAFILE_API_TOKEN`. `SEAFILE_USERNAME` and `SEAFILE_PASSWORD` are only a fallback for instances that support `/api2/auth-token/`; institutional single sign-on may require an API token or app-specific password.
 - When `SEAFILE_SHARE_LINKS=true`, API responses expose `cloud_workspace.preview_url` and `cloud_workspace.download_url`. The chat UI shows these links in the cloud workspace section.
+- `POST /api/sessions/{session_id}/sync` and the sync icon in `/chat` trigger an immediate session upload and refresh the preview/download links.
 - Never commit `.env` or send the account password in chat. Real credentials remain in the local `.env`, which is excluded by `.gitignore`.
 
 ## Deploy

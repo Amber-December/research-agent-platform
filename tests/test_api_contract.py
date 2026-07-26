@@ -131,6 +131,19 @@ def test_session_file_upload_rejects_invalid_target(service, monkeypatch):
     assert response.status_code == 400
 
 
+def test_manual_session_cloud_sync_endpoint(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    client = TestClient(api_module.app)
+    session = service.store.create_session()
+
+    response = client.post(f"/api/sessions/{session.session_id}/sync")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"] == session.session_id
+    assert payload["cloud_workspace"]["status"] == "disabled"
+
+
 def test_approve_returns_before_background_completion(service, monkeypatch):
     monkeypatch.setattr(api_module, "agent", service)
 

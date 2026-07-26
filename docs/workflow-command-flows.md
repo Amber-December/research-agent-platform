@@ -84,6 +84,28 @@ flowchart TD
 
 `/plan` owns hypotheses, claim-to-evidence requirements, datasets, baselines, metrics, ablations, sanity checks, resources, launch order, stop conditions, milestones, and the execution checklist.
 
+## `/write`: evidence-grounded paper production
+
+```mermaid
+flowchart TD
+    A["/write + uploaded or workspace materials"] --> B["Freeze writing SourceSet"]
+    B --> B1["Content/PAPER_SOURCE_SELECTION.json"]
+    B --> C["Extract stable source/page/provenance records"]
+    C --> C1["paper/PAPER_EVIDENCE_MAP.json"]
+    C1 --> D["Paper Plan and paragraph jobs"]
+    D --> E{"Genuine venue/story choice?"}
+    E -->|Yes| F["Writing Outline Approval"]
+    F -->|Revise| D
+    F -->|Approve| G["Narrative report and complete first draft"]
+    E -->|No| G
+    G --> H["Independent paper self-review with stable issue IDs"]
+    H --> I["Evidence-preserving complete revision"]
+    I --> J["Citation and delivery gates"]
+    J --> K["DOCX / PDF / TeX exports from PAPER_REVISED.md"]
+```
+
+The deterministic gates validate source presence, required sections, citation-key resolution, evidence-ID resolution, placeholders, and compile status. They do not claim that citations semantically support each sentence; author verification remains required.
+
 ## `/rebuttal`: peer-review response
 
 ```mermaid
@@ -105,6 +127,12 @@ flowchart TD
     I --> I1["rebuttal/REBUTTAL_DRAFT.md"]
     I1 --> J["Section-level Revision Plan"]
     J --> J1["rebuttal/REVISION_PLAN.md"]
+    J1 --> K["Apply supported edits to complete revised manuscript"]
+    K --> K1["paper/PAPER_REVISED_AFTER_REVIEW.md"]
+    K1 --> L["Per-comment revision ledger"]
+    L --> L1["rebuttal/REVISION_LEDGER.md"]
+    L1 --> M["Deterministic comment-ID closure gate"]
+    M --> M1["rebuttal/REBUTTAL_CLOSURE_REPORT.json"]
 ```
 
 `/rebuttal` does not search for literature and does not infer a manuscript from the objective. Input priority is explicit `--paper`/`--review` paths, then the latest matching upload batch, then the newest final-paper material under `paper/` and review material under `rebuttal/uploads/`. The SourceSet is frozen at task start. A checkpoint appears only when evidence cannot resolve two or more genuinely mutually exclusive response strategies. `/auto-review-loop` and `/review-response` route to `/rebuttal` for compatibility.
@@ -148,3 +176,5 @@ flowchart LR
 ```
 
 Cloud sync failures are recorded in `ChatSession.cloud_workspace.error` and the task progress log. They do not fail the research workflow.
+
+For Tsinghua Seafile, the local configuration tool exchanges a hidden password prompt for an API token and stores only the token in `.env`. The `/chat` sync icon or `POST /api/sessions/{session_id}/sync` then uploads the current session and refreshes its folder share links.

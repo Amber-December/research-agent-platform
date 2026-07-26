@@ -21,6 +21,14 @@ from .graphs.runtime import LangGraphWorkflowRuntime
 from .graphs.workflows import StageDefinition, WorkflowDefinition, workflow_registry
 from .memory.wiki import WikiService
 from .models import ApprovalCheckpoint, ChatSession, CloudWorkspaceState, MessageRecord, TaskRun, utc_now
+from .paper_pipeline import (
+    build_paper_quality_reports,
+    collect_paper_evidence,
+    paper_evidence_prompt,
+    paper_evidence_to_json,
+    resolve_write_source_config,
+    select_venue_profile,
+)
 from .presentation import (
     SlideRender,
     assemble_mixed_deck,
@@ -45,6 +53,7 @@ from .presentation import (
 )
 from .rebuttal import (
     RebuttalInputError,
+    build_rebuttal_closure_report,
     rebuttal_inputs_markdown,
     resolve_rebuttal_source_config,
 )
@@ -327,6 +336,13 @@ class ResearchAgentService:
                 session.upload_batches,
                 source_limit=config.presentation_source_limit,
             )
+        if task.command == "/write":
+            task.write_source = resolve_write_source_config(
+                task.objective,
+                task_root,
+                session.upload_batches,
+                source_limit=config.write_source_limit,
+            )
         if task.command == "/rebuttal":
             try:
                 task.rebuttal_source = resolve_rebuttal_source_config(
@@ -446,6 +462,8 @@ class ResearchAgentService:
             task.artifacts.extend(await self._write_figure_delivery_artifacts(task))
         if task.command == "/write":
             task.artifacts.extend(await self._write_delivery_artifacts(task))
+        if task.command == "/rebuttal":
+            task.artifacts.extend(self._write_rebuttal_delivery_artifacts(task))
         if task.command == "/present":
             await self._write_presentation_delivery_artifacts(task)
         wiki_note = self.wiki.record_task(task)
@@ -483,6 +501,33 @@ class ResearchAgentService:
                 kind=stage.artifact_kind,
                 description=f"{workflow.title} / {stage.title}",
             )
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
+        if task.command == "/write" and stage.name == "paper_evidence":
+            records = self._paper_evidence_records(task)
+            artifact = self._write_text(
+                task,
+                stage.artifact_path,
+                paper_evidence_to_json(records),
+                kind=stage.artifact_kind,
+                description=f"{workflow.title} / {stage.title}",
+            )
+            metadata_artifact = self._write_text(
+                task,
+                "Content/PAPER_EVIDENCE_METADATA.json",
+                json.dumps(
+                    {
+                        "task_id": task.task_id,
+                        "source_refs": list(task.write_source.source_refs if task.write_source else []),
+                        "evidence_count": len(records),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                kind="note",
+                description="Cache identity for the frozen paper evidence map.",
+            )
+            task.artifacts.append(metadata_artifact)
             self.artifacts._write_manifest_for_root(Path(task.artifact_root))
             return artifact
         prompt = self._build_stage_prompt(task, workflow, stage, revision_feedback)
@@ -564,6 +609,12 @@ class ResearchAgentService:
             support_artifacts.extend(rebuttal_artifacts)
             if rebuttal_context:
                 support_context_parts.append(rebuttal_context)
+            return support_artifacts, "\n\n".join(support_context_parts)
+        if task.command == "/write":
+            write_artifacts, write_context = self._prepare_write_support(task)
+            support_artifacts.extend(write_artifacts)
+            if write_context:
+                support_context_parts.append(write_context)
             return support_artifacts, "\n\n".join(support_context_parts)
         if task.command not in {"/review", "/idea"}:
             return support_artifacts, "\n\n".join(support_context_parts)
@@ -775,7 +826,116 @@ class ResearchAgentService:
             + "\n\nReviewer comments:\n"
             + (review_evidence.text or "No readable reviewer text could be extracted from the frozen files.")
         )
+        workflow_context = []
+        for relative in (
+            "rebuttal/REVIEW_TO_PAPER_MAP.md",
+            "rebuttal/RESPONSE_STRATEGY.md",
+            "rebuttal/REBUTTAL_DRAFT.md",
+            "rebuttal/REVISION_PLAN.md",
+            "paper/PAPER_REVISED_AFTER_REVIEW.md",
+        ):
+            excerpt = self._artifact_excerpt(task, relative)
+            if excerpt:
+                workflow_context.append(f"### {relative}\n{excerpt}")
+        if workflow_context:
+            context += "\n\nExisting rebuttal workflow artifacts:\n" + "\n\n".join(workflow_context)
         return artifacts, context
+
+    def _prepare_write_support(self, task: TaskRun) -> tuple[list, str]:
+        workspace_root = Path(task.artifact_root)
+        source_config = task.write_source
+        if source_config is None:
+            session = self.store.load_session(task.session_id)
+            source_config = resolve_write_source_config(
+                task.objective,
+                workspace_root,
+                session.upload_batches if session else (),
+                source_limit=config.write_source_limit,
+            )
+            task.write_source = source_config
+            self.store.save_task(task)
+
+        selection = {
+            "task_id": task.task_id,
+            **source_config.model_dump(),
+            "source_boundary": "frozen_at_task_start",
+        }
+        selection_json = json.dumps(selection, ensure_ascii=False, indent=2)
+        selection_path = workspace_root / "Content" / "PAPER_SOURCE_SELECTION.json"
+        artifacts: list = []
+        if (
+            not selection_path.exists()
+            or selection_path.read_text(encoding="utf-8", errors="ignore") != selection_json
+        ):
+            artifacts.append(
+                self._write_text(
+                    task,
+                    "Content/PAPER_SOURCE_SELECTION.json",
+                    selection_json,
+                    kind="note",
+                    description="Frozen source boundary for the paper-writing workflow.",
+                )
+            )
+
+        records = self._paper_evidence_records(task)
+        venue_profile = select_venue_profile(task.objective)
+        profile_json = json.dumps(venue_profile, ensure_ascii=False, indent=2)
+        profile_path = workspace_root / "Content" / "PAPER_VENUE_PROFILE.json"
+        if (
+            not profile_path.exists()
+            or profile_path.read_text(encoding="utf-8", errors="ignore") != profile_json
+        ):
+            artifacts.append(
+                self._write_text(
+                    task,
+                    "Content/PAPER_VENUE_PROFILE.json",
+                    profile_json,
+                    kind="note",
+                    description="Paper type, target venue, and content delivery requirements.",
+                )
+            )
+        context = (
+            "Paper writing SourceSet contract:\n"
+            f"- Frozen scope: {source_config.resolved_scope}\n"
+            f"- Selection reason: {source_config.selection_reason}\n"
+            f"- Writing profile: {venue_profile['profile']}\n"
+            f"- Target venue: {venue_profile['venue']}\n"
+            "- Use only the frozen evidence records below for factual claims, numbers, figures, tables, and citations.\n"
+            "- Cite evidence IDs such as PE-XXXXXXXXXX in planning, self-review, and revision traceability.\n"
+            "- Preserve uncertainty and write [AUTHOR INPUT NEEDED] when evidence is missing.\n"
+            "- Do not claim that a venue template is validated unless a real publisher template was supplied and compiled.\n\n"
+            "Frozen source files:\n"
+            + ("\n".join(f"- `{path}`" for path in source_config.source_refs) or "- None")
+            + "\n\nEvidence records:\n"
+            + (paper_evidence_prompt(records) or "No readable evidence was extracted; keep all unsupported sections explicit.")
+        )
+        return artifacts, context
+
+    def _paper_evidence_records(self, task: TaskRun) -> list[dict]:
+        workspace_root = Path(task.artifact_root)
+        source_config = task.write_source
+        if source_config is None:
+            return []
+        evidence_path = workspace_root / "paper" / "PAPER_EVIDENCE_MAP.json"
+        metadata_path = workspace_root / "Content" / "PAPER_EVIDENCE_METADATA.json"
+        metadata: dict = {}
+        if metadata_path.exists():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                metadata = {}
+        cache_matches = (
+            metadata.get("task_id") == task.task_id
+            and metadata.get("source_refs") == list(source_config.source_refs)
+        )
+        if cache_matches and evidence_path.exists():
+            try:
+                records = json.loads(evidence_path.read_text(encoding="utf-8"))
+                if isinstance(records, list):
+                    return records
+            except json.JSONDecodeError:
+                pass
+        return collect_paper_evidence(workspace_root, source_config.source_refs)
 
     async def _write_research_contract(self, task: TaskRun) -> None:
         template_path = Path(config.aris_repo_root) / "templates" / "RESEARCH_CONTRACT_TEMPLATE.md"
@@ -1426,60 +1586,105 @@ class ResearchAgentService:
             return len(preferred) + 1, relative_path
 
     async def _write_delivery_artifacts(self, task: TaskRun) -> list:
-        draft = self._artifact_text(task, "paper/PAPER_DRAFT.md")
-        if not draft:
+        revised = self._artifact_text(task, "paper/PAPER_REVISED.md")
+        manuscript = revised or self._artifact_text(task, "paper/PAPER_DRAFT.md")
+        if not manuscript:
             return []
+        manuscript_stem = "PAPER_REVISED" if revised else "PAPER_DRAFT"
+        manuscript_relative = f"paper/{manuscript_stem}.md"
         formats = detect_write_formats(task.objective)
         artifacts = []
-        title = self._detect_title(draft) or "Research Draft"
+        title = self._detect_title(manuscript) or "Research Draft"
         if "tex" in formats:
-            tex = markdown_to_latex(draft, title=title)
+            tex = markdown_to_latex(manuscript, title=title)
             artifacts.append(
                 self._write_text(
                     task,
-                    "paper/PAPER_DRAFT.tex",
+                    f"paper/{manuscript_stem}.tex",
                     tex,
                     kind="document",
-                    description="LaTeX export generated from the paper draft.",
+                    description="LaTeX export generated from the evidence-reviewed paper manuscript.",
                 )
             )
         if "docx" in formats:
-            docx_bytes = markdown_to_docx_bytes(draft)
+            docx_bytes = markdown_to_docx_bytes(manuscript)
             artifacts.append(
                 self._write_bytes(
                     task,
-                    "paper/PAPER_DRAFT.docx",
+                    f"paper/{manuscript_stem}.docx",
                     docx_bytes,
                     kind="document",
-                    description="Word export generated from the paper draft.",
+                    description="Word export generated from the evidence-reviewed paper manuscript.",
                 )
             )
         if "pdf" in formats:
-            pdf_bytes = markdown_to_pdf_bytes(draft)
+            pdf_bytes = markdown_to_pdf_bytes(manuscript)
             artifacts.append(
                 self._write_bytes(
                     task,
-                    "paper/PAPER_DRAFT.pdf",
+                    f"paper/{manuscript_stem}.pdf",
                     pdf_bytes,
                     kind="document",
-                    description="PDF export generated from the paper draft.",
+                    description="PDF export generated from the evidence-reviewed paper manuscript.",
                 )
             )
-        artifacts.extend(await self._compile_paper_draft(task, draft))
+        artifacts.extend(await self._compile_paper_manuscript(task, manuscript, manuscript_stem))
+        evidence_records = self._paper_evidence_records(task)
+        compile_status_relative = f"paper/{manuscript_stem}_COMPILE_STATUS.md"
+        citation_audit, delivery_report = build_paper_quality_reports(
+            Path(task.artifact_root),
+            manuscript_relative,
+            evidence_records,
+            select_venue_profile(task.objective),
+            compile_status_relative=compile_status_relative,
+        )
+        artifacts.append(
+            self._write_text(
+                task,
+                "paper/CITATION_AUDIT.json",
+                json.dumps(citation_audit, ensure_ascii=False, indent=2),
+                kind="review",
+                description="Deterministic citation-key audit for the revised paper.",
+            )
+        )
+        artifacts.append(
+            self._write_text(
+                task,
+                "paper/PAPER_DELIVERY_REPORT.json",
+                json.dumps(delivery_report, ensure_ascii=False, indent=2),
+                kind="review",
+                description="Deterministic paper structure, evidence, citation, and compile delivery gate.",
+            )
+        )
         return artifacts
 
-    async def _compile_paper_draft(self, task: TaskRun, draft: str) -> list:
-        tex = markdown_to_latex(draft, title=self._detect_title(draft) or "Research Draft")
+    def _write_rebuttal_delivery_artifacts(self, task: TaskRun) -> list:
+        report = build_rebuttal_closure_report(Path(task.artifact_root))
+        return [
+            self._write_text(
+                task,
+                "rebuttal/REBUTTAL_CLOSURE_REPORT.json",
+                json.dumps(report, ensure_ascii=False, indent=2),
+                kind="review",
+                description="Deterministic comment coverage and declared revision-status gate.",
+            )
+        ]
+
+    async def _compile_paper_manuscript(self, task: TaskRun, manuscript: str, stem: str) -> list:
+        tex = markdown_to_latex(
+            manuscript,
+            title=self._detect_title(manuscript) or "Research Draft",
+        )
         build_dir = Path(task.artifact_root) / "paper" / ".compile"
         build_dir.mkdir(parents=True, exist_ok=True)
-        source = build_dir / "PAPER_DRAFT.tex"
+        source = build_dir / f"{stem}.tex"
         source.write_text(tex, encoding="utf-8")
         compiler = self._resolve_tex_compiler()
         if not compiler:
             return [
                 self._write_text(
                     task,
-                    "paper/PAPER_COMPILE_STATUS.md",
+                    f"paper/{stem}_COMPILE_STATUS.md",
                     "# Paper Compile Status\n\n- Status: failed\n- Reason: LaTeX compiler not available.\n",
                     kind="note",
                     description="Paper compile status report.",
@@ -1512,18 +1717,18 @@ class ResearchAgentService:
             outputs.append(
                 self._write_text(
                     task,
-                    "paper/PAPER_COMPILE_LOG.txt",
+                    f"paper/{stem}_COMPILE_LOG.txt",
                     log_text,
                     kind="note",
                     description="LaTeX compilation log for the paper draft.",
                 )
             )
-            pdf_path = build_dir / "PAPER_DRAFT.pdf"
+            pdf_path = build_dir / f"{stem}.pdf"
             if pdf_path.exists():
                 outputs.append(
                     self._write_bytes(
                         task,
-                        "paper/PAPER_DRAFT_COMPILED.pdf",
+                        f"paper/{stem}_COMPILED.pdf",
                         pdf_path.read_bytes(),
                         kind="document",
                         description=f"Compiled PDF generated via {Path(compiler).name}.",
@@ -1532,10 +1737,10 @@ class ResearchAgentService:
                 outputs.append(
                     self._write_text(
                         task,
-                        "paper/PAPER_COMPILE_STATUS.md",
+                        f"paper/{stem}_COMPILE_STATUS.md",
                         "# Paper Compile Status\n\n- Status: success\n- Compiler: "
                         + Path(compiler).name
-                        + "\n- Output: `paper/PAPER_DRAFT_COMPILED.pdf`\n",
+                        + f"\n- Output: `paper/{stem}_COMPILED.pdf`\n",
                         kind="note",
                         description="Paper compile status report.",
                     )
@@ -1544,7 +1749,7 @@ class ResearchAgentService:
                 outputs.append(
                     self._write_text(
                         task,
-                        "paper/PAPER_COMPILE_STATUS.md",
+                        f"paper/{stem}_COMPILE_STATUS.md",
                         "# Paper Compile Status\n\n- Status: failed\n- Reason: PDF not produced.\n",
                         kind="note",
                         description="Paper compile status report.",
@@ -1554,7 +1759,7 @@ class ResearchAgentService:
             outputs.append(
                 self._write_text(
                     task,
-                    "paper/PAPER_COMPILE_STATUS.md",
+                    f"paper/{stem}_COMPILE_STATUS.md",
                     f"# Paper Compile Status\n\n- Status: failed\n- Reason: {exc.__class__.__name__}: {exc}\n",
                     kind="note",
                     description="Paper compile status report.",

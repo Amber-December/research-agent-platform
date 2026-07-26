@@ -77,6 +77,14 @@ class RebuttalSourceConfig(BaseModel):
     upload_batch_ids: list[str] = Field(default_factory=list)
 
 
+class WriteSourceConfig(BaseModel):
+    requested_scope: PresentationSourceScope = "auto"
+    resolved_scope: PresentationSourceScope
+    source_refs: list[str] = Field(default_factory=list)
+    upload_batch_id: str = ""
+    selection_reason: str = ""
+
+
 class CloudWorkspaceState(BaseModel):
     provider: str = "seafile"
     status: CloudSyncStatus = "disabled"
@@ -125,6 +133,7 @@ class TaskRun(BaseModel):
     notes: list[str] = Field(default_factory=list)
     presentation_source: PresentationSourceConfig | None = None
     rebuttal_source: RebuttalSourceConfig | None = None
+    write_source: WriteSourceConfig | None = None
 
 
 class ChatSession(BaseModel):
