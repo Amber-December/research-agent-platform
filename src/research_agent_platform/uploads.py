@@ -66,6 +66,8 @@ def classify_upload(filename: str, target: str = "auto") -> str:
     if any(term in lowered_name for term in REVIEW_FILENAME_TERMS):
         return "rebuttal"
     extension = Path(filename).suffix.lower()
+    if extension == ".pdf" and re.match(r"^p\d{3}(?:[_-]|$)", lowered_name):
+        return "bib"
     if extension in IMAGE_EXTENSIONS:
         return "figures"
     if extension in PAPER_EXTENSIONS:
@@ -88,7 +90,7 @@ def sanitize_upload_filename(filename: str) -> str:
 
 
 def next_upload_relative_path(workspace_root: Path, directory: str, filename: str) -> str:
-    upload_directory = workspace_root / directory / "uploads"
+    upload_directory = _upload_directory(workspace_root, directory, filename)
     candidate = upload_directory / filename
     if not candidate.exists():
         return candidate.relative_to(workspace_root).as_posix()
@@ -99,6 +101,12 @@ def next_upload_relative_path(workspace_root: Path, directory: str, filename: st
         if not numbered.exists():
             return numbered.relative_to(workspace_root).as_posix()
     raise ValueError(f"Too many files share the same name: {filename}")
+
+
+def _upload_directory(workspace_root: Path, directory: str, filename: str) -> Path:
+    if directory == "bib" and Path(filename).suffix.lower() == ".pdf":
+        return workspace_root / "bib" / "papers"
+    return workspace_root / directory / "uploads"
 
 
 def upload_artifact_kind(filename: str) -> str:

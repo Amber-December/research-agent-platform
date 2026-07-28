@@ -46,6 +46,7 @@ class SeafileWorkspaceSync:
         create_share_links: bool = True,
         share_password: str = "",
         timeout_seconds: float = 120.0,
+        sync_retries: int = 3,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.enabled = enabled
@@ -59,8 +60,45 @@ class SeafileWorkspaceSync:
         self.create_share_links = create_share_links
         self.share_password = share_password
         self.timeout_seconds = timeout_seconds
+        self.sync_retries = max(1, sync_retries)
         self.transport = transport
         self._locks: dict[str, asyncio.Lock] = {}
+
+    def configuration_status(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {
+                "enabled": False,
+                "configured": bool(self.base_url and (self.api_token or (self.username and self.password))),
+                "auth_mode": "token" if self.api_token else "username_password" if self.username and self.password else "missing",
+                "hint": "设置 CLOUD_SYNC_ENABLED=true 后重启服务即可启用 Seafile 增量同步。",
+            }
+        if not self.base_url:
+            return {
+                "enabled": True,
+                "configured": False,
+                "auth_mode": "missing",
+                "hint": "已启用云盘同步，但缺少 SEAFILE_BASE_URL。",
+            }
+        if self.api_token:
+            return {
+                "enabled": True,
+                "configured": True,
+                "auth_mode": "token",
+                "hint": "Seafile API Token 已配置，首次同步时会自动创建或复用远程库。",
+            }
+        if self.username and self.password:
+            return {
+                "enabled": True,
+                "configured": True,
+                "auth_mode": "username_password",
+                "hint": "Seafile 账号密码已配置，将在首次同步时换取临时 API Token。",
+            }
+        return {
+            "enabled": True,
+            "configured": False,
+            "auth_mode": "missing",
+            "hint": "已启用云盘同步，但缺少 SEAFILE_API_TOKEN 或账号密码。",
+        }
 
     def remote_session_path(self, user_id: str, session_id: str) -> str:
         return "/" + PurePosixPath(
@@ -88,20 +126,31 @@ class SeafileWorkspaceSync:
 
         lock = self._locks.setdefault(f"{user_id}/{session_id}", asyncio.Lock())
         async with lock:
-            try:
-                return await self._sync_locked(
-                    workspace_root,
-                    user_id=user_id,
-                    session_id=session_id,
-                    remote_path=remote_path,
-                )
-            except Exception as exc:
-                return SeafileSyncResult(
-                    status="error",
-                    remote_path=remote_path,
-                    repo_id=self.repo_id,
-                    error=f"{exc.__class__.__name__}: {str(exc).strip()}",
-                )
+            for attempt in range(self.sync_retries):
+                try:
+                    return await self._sync_locked(
+                        workspace_root,
+                        user_id=user_id,
+                        session_id=session_id,
+                        remote_path=remote_path,
+                    )
+                except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                    if attempt + 1 >= self.sync_retries:
+                        return SeafileSyncResult(
+                            status="error",
+                            remote_path=remote_path,
+                            repo_id=self.repo_id,
+                            error=f"{exc.__class__.__name__}: {str(exc).strip()}",
+                        )
+                    await asyncio.sleep(0.4 * (attempt + 1))
+                except Exception as exc:
+                    return SeafileSyncResult(
+                        status="error",
+                        remote_path=remote_path,
+                        repo_id=self.repo_id,
+                        error=f"{exc.__class__.__name__}: {str(exc).strip()}",
+                    )
+            raise RuntimeError("Seafile sync exhausted its retry budget.")
 
     async def _sync_locked(
         self,

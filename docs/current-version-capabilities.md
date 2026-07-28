@@ -9,8 +9,8 @@
 
 ## Research commands
 
-- **`/review`:** uses `ScholarSearchService` to query OpenAlex, Semantic Scholar, arXiv, optional Web of Science, and adapter-based CNKI. It writes a scoped brief, synthesis, evidence map, and research-gap report under `bib/`.
-- **`/idea`:** uses literature and novelty skills to generate candidates, performs an independent critic stage, and writes `FINAL_IDEA.md` plus a research contract. It uses targeted retrieval when evidence is missing and does not produce experiment plans.
+- **`/review`:** uses `ScholarSearchService` to query OpenAlex, Semantic Scholar, arXiv, optional Web of Science, and adapter-based CNKI. Formal synthesis requires at least 10 admitted and traceable sources. Explicit public PDF URLs are downloaded into `bib/papers/` with per-paper status in `bib/LITERATURE_DOWNLOADS.json`; inaccessible or paywalled records remain metadata-only.
+- **`/idea`:** uses literature and novelty skills to generate candidates, performs an independent critic stage, and writes `FINAL_IDEA.md` plus a research contract. It uses targeted retrieval when evidence is missing, does not produce experiment plans, and does not stop for routine approval.
 - **`/plan`:** consumes `FINAL_IDEA`, the research contract, and review evidence when available. Three stages produce a research blueprint, claim-driven experiment plan, and execution checklist.
 - **`/rebuttal`:** requires a completed paper plus reviewer comments, freezes a typed dual-source input set, maps stable comment IDs to manuscript evidence, pauses only for genuinely mutually exclusive strategies, drafts point-by-point responses, produces a revised manuscript and per-comment revision ledger, and runs a deterministic closure gate.
 - **`/code`:** produces an implementation plan, launch runbook, and local collaboration handoff for executing experiments.
@@ -38,3 +38,11 @@
 - **Lifecycle hooks:** synchronization runs after workspace initialization, user uploads, each workflow stage, checkpoint creation, and final delivery.
 - **Links and failure handling:** the connector creates or reuses a folder share link and returns it as preview/download URLs. Authentication or network errors are visible in task/session state but do not fail the scientific workflow.
 - **Manual refresh:** the chat sync icon calls `POST /api/sessions/{session_id}/sync` to upload current changes and refresh the folder links on demand.
+
+## Streaming task progress
+
+- `/api/agent/chat` creates a routed workflow task and returns its `task_id` immediately; the API background worker executes the LangGraph task.
+- `GET /api/tasks/{task_id}/events` emits SSE `snapshot`, `progress`, and `done` events. The event payload contains only operationally auditable progress, not hidden model chain-of-thought.
+- Ordinary questions from `/chat` use a lightweight `/chat` task and the same SSE endpoint; OpenAI-compatible `/v1/*` calls remain synchronous.
+- The UI reconnects through the task status endpoint when SSE is unavailable, so a dropped browser connection does not lose the task.
+- Cloud sync is a one-way incremental mirror. It requires `CLOUD_SYNC_ENABLED=true`, `SEAFILE_BASE_URL`, and either `SEAFILE_API_TOKEN` or username/password in the local ignored `.env`; the service must be restarted after configuration.

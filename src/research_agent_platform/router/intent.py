@@ -16,8 +16,6 @@ APPROVE_WORDS = {
     "同意",
     "批准",
     "继续",
-    "通过",
-    "可以",
 }
 
 STOP_WORDS = {"stop", "halt", "cancel", "停止", "取消"}
@@ -30,6 +28,7 @@ ALIASES = {
     "/paper-writing": "/write",
     "/literature-review": "/review",
     "/lit-review": "/review",
+    "/paper-download": "/download",
     "/auto-review-loop": "/rebuttal",
     "/review-response": "/rebuttal",
     "/paper-slides": "/present",
@@ -38,10 +37,11 @@ ALIASES = {
 
 COMMAND_DESCRIPTIONS = {
     "/review": "search, organize, and synthesize research literature and evidence",
+    "/download": "search for papers, resolve public PDFs, and download them into the workspace",
     "/idea": "generate, challenge, verify, and select research ideas",
     "/plan": "turn a selected idea or objective into experiments and an execution plan",
     "/code": "turn the chosen plan into implementation and experiment execution materials",
-    "/fig": "design figures, tables, and visual narratives for the research output",
+    "/fig": "generate precise research charts from data or scientific illustrations with gpt-image-2",
     "/write": "create paper outlines, narrative reports, and draft sections",
     "/rebuttal": "analyze peer-review comments and produce rebuttal and revision materials",
     "/present": "prepare slides, poster, talk track, and Q&A materials",
@@ -58,7 +58,17 @@ HEURISTICS = {
         "文献调研",
         "找文献",
         "相关工作",
-        "查新",
+        "检索文献",
+    ],
+    "/download": [
+        "download paper",
+        "paper download",
+        "pdf download",
+        "download pdf",
+        "download literature",
+        "download papers",
+        "下载论文",
+        "下载pdf",
     ],
     "/idea": ["idea", "novelty", "research topic", "选题", "想法", "创新点", "研究方向"],
     "/plan": [
@@ -83,7 +93,7 @@ HEURISTICS = {
         "审稿意见",
         "审稿回复",
         "返修",
-        "回复审稿人",
+        "回复审稿",
     ],
     "/present": ["slides", "poster", "talk", "presentation", "汇报", "答辩", "ppt"],
     "/wiki": ["wiki", "memory", "knowledge base", "知识库", "记忆", "归档"],
@@ -127,15 +137,19 @@ def _looks_like_chat(message: str) -> bool:
     return len(stripped) <= 24 and any(cue in stripped for cue in CHAT_CUES)
 
 
-async def route_message(message: str) -> RouteDecision | None:
+async def route_message(message: str, context: str = "") -> RouteDecision | None:
     stripped = message.strip()
-    first_token = stripped.split(maxsplit=1)[0] if stripped else ""
-    if first_token.startswith("/"):
-        command = ALIASES.get(first_token, first_token)
-        if command in COMMAND_DESCRIPTIONS:
-            return RouteDecision(command=command, source="explicit", reason=f"explicit command {first_token}")
+    explicit = explicit_route(message)
+    if explicit is not None:
+        return explicit
 
     if _looks_like_chat(stripped):
+        return None
+
+    if context.strip() and _looks_like_session_followup_question(stripped):
+        return None
+
+    if _looks_like_artifact_location_question(stripped):
         return None
 
     lowered = stripped.lower()
@@ -160,6 +174,8 @@ async def route_message(message: str) -> RouteDecision | None:
         "Return only one token: a command token or chat.\n\n"
         f"{options}\n\nUser request:\n{message}"
     )
+    if context.strip():
+        classifier_prompt += f"\n\nSession context:\n{context.strip()}"
     raw = await generate_text(
         system_prompt="You are a strict intent router. Output one token only.",
         user_prompt=classifier_prompt,
@@ -172,3 +188,130 @@ async def route_message(message: str) -> RouteDecision | None:
     if command not in COMMAND_DESCRIPTIONS:
         return None
     return RouteDecision(command=command, source="implicit_llm", reason=f"llm classifier -> {command}")
+
+
+def _looks_like_artifact_location_question(message: str) -> bool:
+    normalized = "".join(message.lower().split())
+    if not normalized:
+        return False
+    location_terms = (
+        "where",
+        "saved",
+        "save",
+        "output",
+        "download",
+        "link",
+        "path",
+        "file",
+        "folder",
+        "directory",
+        "artifact",
+        "在哪里",
+        "在哪",
+        "哪里",
+        "哪儿",
+        "输出到",
+        "保存到",
+        "放到",
+        "存到",
+        "路径",
+        "位置",
+        "下载",
+        "链接",
+        "文件",
+        "文件夹",
+        "目录",
+        "产物",
+    )
+    artifact_terms = (
+        "figure",
+        "image",
+        "plot",
+        "chart",
+        "diagram",
+        "artifact",
+        "output",
+        "paper",
+        "docx",
+        "pdf",
+        "ppt",
+        "png",
+        "svg",
+        "图",
+        "图片",
+        "图像",
+        "图表",
+        "示意图",
+        "流程图",
+        "产物",
+        "论文",
+        "文档",
+        "文件",
+        "结果",
+    )
+    followup_terms = (
+        "要求的",
+        "刚才",
+        "上个",
+        "上一",
+        "前面",
+        "生成的",
+        "输出的",
+        "保存的",
+        "that",
+        "the",
+        "last",
+        "previous",
+        "generated",
+    )
+    has_location = any(term in normalized for term in location_terms)
+    has_artifact = any(term in normalized for term in artifact_terms)
+    has_followup = any(term in normalized for term in followup_terms)
+    return has_location and has_artifact and (has_followup or len(normalized) <= 80)
+
+
+def _looks_like_session_followup_question(message: str) -> bool:
+    normalized = "".join(message.lower().split())
+    if not normalized:
+        return False
+    followup_terms = (
+        "那张",
+        "那篇",
+        "那个",
+        "这个",
+        "它",
+        "刚才",
+        "刚刚",
+        "前面",
+        "前文",
+        "上一个",
+        "上张",
+        "上一",
+        "继续",
+        "接着",
+        "还能",
+        "还在",
+        "哪里",
+        "哪儿",
+        "呢",
+        "吗",
+        "吧",
+        "still",
+        "again",
+        "previous",
+        "that",
+        "this",
+        "it",
+    )
+    return any(term in normalized for term in followup_terms)
+
+
+def explicit_route(message: str) -> RouteDecision | None:
+    stripped = message.strip()
+    first_token = stripped.split(maxsplit=1)[0] if stripped else ""
+    if not first_token.startswith("/"):
+        return None
+    command = ALIASES.get(first_token, first_token)
+    if command not in COMMAND_DESCRIPTIONS:
+        return None
+    return RouteDecision(command=command, source="explicit", reason=f"explicit command {first_token}")

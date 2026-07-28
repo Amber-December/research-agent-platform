@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from ..models import ChatSession, TaskRun, utc_now
+from ..models import ChatSession, CloudAuthProfile, TaskRun, utc_now
 
 
 class StateStore:
@@ -15,14 +15,19 @@ class StateStore:
         self.artifact_root = Path(artifact_root) if artifact_root else self.root.parent / "agent-workspace"
         self.sessions_dir = self.root / "sessions"
         self.tasks_dir = self.root / "tasks"
+        self.cloud_auth_dir = self.root / "cloud-auth"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
+        self.cloud_auth_dir.mkdir(parents=True, exist_ok=True)
 
     def _session_path(self, session_id: str) -> Path:
         return self.sessions_dir / f"{session_id}.json"
 
     def _task_path(self, task_id: str) -> Path:
         return self.tasks_dir / f"{task_id}.json"
+
+    def _cloud_auth_path(self, user_id: str) -> Path:
+        return self.cloud_auth_dir / f"{self._slug(user_id)}.json"
 
     def create_session(self, user_id: str = "local") -> ChatSession:
         session = ChatSession(user_id=user_id or "local")
@@ -65,6 +70,22 @@ class StateStore:
     def save_task(self, task: TaskRun) -> None:
         task.updated_at = utc_now()
         self._write_json(self._task_path(task.task_id), task.model_dump_json(indent=2))
+
+    def load_cloud_auth(self, user_id: str) -> CloudAuthProfile | None:
+        path = self._cloud_auth_path(user_id)
+        if not path.exists():
+            return None
+        return CloudAuthProfile.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def save_cloud_auth(self, profile: CloudAuthProfile) -> None:
+        profile.updated_at = utc_now()
+        self._write_json(
+            self._cloud_auth_path(profile.user_id),
+            profile.model_dump_json(indent=2),
+        )
+
+    def delete_cloud_auth(self, user_id: str) -> None:
+        self._cloud_auth_path(user_id).unlink(missing_ok=True)
 
     def list_tasks(self, session_id: str | None = None) -> list[TaskRun]:
         tasks: list[TaskRun] = []

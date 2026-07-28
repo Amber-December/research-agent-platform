@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agent import ResearchAgentService
@@ -31,192 +32,179 @@ CHAT_PAGE = """<!doctype html>
   <link rel="icon" href="data:,">
   <title>Research Agent</title>
   <style>
-    :root { color-scheme: light; --bg:#f3f0e8; --panel:#fffdf8; --ink:#1e2430; --line:#d8d2c7; --accent:#2457d6; --soft:#eef2fb; --warn:#a54a14; }
+    :root { color-scheme:light; --bg:#f5f5f4; --surface:#fff; --ink:#202124; --muted:#70757a; --line:#dedede; --soft:#f0f1f2; --accent:#2457d6; --warn:#9b4b18; --error:#a12d2d; }
     * { box-sizing:border-box; }
-    body { margin:0; font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:linear-gradient(160deg,#efe7d6 0%,#f6f4ee 45%,#ebeef7 100%); color:var(--ink); }
-    .wrap { max-width:1060px; margin:32px auto; padding:0 16px; }
-    .card { background:rgba(255,253,248,.94); border:1px solid var(--line); border-radius:20px; box-shadow:0 18px 60px rgba(36,56,90,.12); overflow:hidden; }
-    .hero { padding:24px; border-bottom:1px solid var(--line); }
-    .hero h1 { margin:0 0 8px; font-size:28px; }
-    .hero p { margin:0 0 10px; color:#4a5365; line-height:1.5; }
-    .hero code { background:#f4f1ea; padding:2px 6px; border-radius:8px; }
-    .toolbar { display:flex; gap:12px; padding:16px 20px 0; }
-    .toolbar input { flex:1; padding:12px 14px; border:1px solid var(--line); border-radius:12px; background:#fff; }
-    .layout { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(320px,.9fr); }
-    .chat { height:56vh; overflow:auto; padding:20px; display:flex; flex-direction:column; gap:14px; border-right:1px solid var(--line); }
-    .msg { max-width:88%; padding:14px 16px; border-radius:16px; white-space:pre-wrap; line-height:1.55; }
-    .user { align-self:flex-end; background:#2457d6; color:#fff; }
-    .assistant { align-self:flex-start; background:var(--soft); color:#1e2430; }
-    .sidebar { padding:18px 20px 20px; background:#faf8f1; display:flex; flex-direction:column; gap:18px; }
-    .section { display:flex; flex-direction:column; gap:8px; }
-    .section h3 { margin:0; font-size:15px; }
-    .status { font-size:14px; color:#4a5365; line-height:1.5; }
-    .cloud-links { display:flex; gap:10px; flex-wrap:wrap; }
-    .cloud-links a { color:#2457d6; text-decoration:none; font-size:13px; }
-    .checkpoint-box { padding:12px 14px; border:1px solid #e5dccd; border-radius:14px; background:#fffaf2; white-space:pre-wrap; line-height:1.45; font-size:14px; }
-    .feedback { width:100%; min-height:96px; resize:vertical; padding:12px 14px; border:1px solid var(--line); border-radius:12px; font:inherit; background:#fff; }
-    .actions { display:flex; gap:10px; flex-wrap:wrap; }
-    .actions[hidden] { display:none; }
-    .button { border:0; border-radius:12px; padding:11px 14px; cursor:pointer; font:inherit; }
+    html, body { height:100%; }
+    body { margin:0; font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); }
+    button, textarea, input { font:inherit; }
+    button { letter-spacing:0; }
+    [hidden] { display:none !important; }
+    .wrap { width:min(100%, 960px); height:100dvh; margin:0 auto; padding:0 18px; }
+    .card { height:100%; min-height:0; display:flex; flex-direction:column; background:var(--surface); border-inline:1px solid var(--line); overflow:hidden; }
+    .topbar { min-height:58px; padding:10px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; background:rgba(255,255,255,.96); }
+    .brand { flex:0 0 auto; font-size:16px; font-weight:650; }
+    .session-meta { min-width:0; flex:1; display:flex; align-items:center; gap:10px; }
+    .session-input { min-width:0; width:100%; max-width:280px; padding:5px 0; border:0; outline:0; background:transparent; color:var(--muted); font-size:12px; text-overflow:ellipsis; }
+    .task-status { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:12px; }
+    .header-actions { display:flex; align-items:center; gap:8px; }
+    .button { border:1px solid transparent; border-radius:7px; min-height:36px; padding:8px 12px; cursor:pointer; background:transparent; color:var(--ink); }
+    .button:disabled { cursor:not-allowed; opacity:.55; }
+    .button:focus-visible, .composer-action:focus-visible { outline:3px solid rgba(36,87,214,.2); outline-offset:2px; }
     .primary { background:var(--accent); color:#fff; }
-    .secondary { background:#fff; color:#1e2430; border:1px solid var(--line); }
-    .composer { padding:16px 20px 20px; border-top:1px solid var(--line); display:flex; gap:12px; }
-    .composer textarea { flex:1; min-height:108px; resize:vertical; padding:14px; border:1px solid var(--line); border-radius:14px; font:inherit; background:#fff; }
-    .composer .button { width:150px; }
-    .upload-panel { padding:16px 20px; border-top:1px solid var(--line); background:#faf8f1; display:grid; grid-template-columns:minmax(0,1fr) 180px; gap:12px; align-items:stretch; }
-    .drop-zone { min-height:92px; border:2px dashed #aeb9d4; background:#fff; display:flex; align-items:center; justify-content:center; gap:12px; padding:16px; cursor:pointer; transition:border-color .16s,background .16s; }
-    .drop-zone:focus-visible { outline:3px solid rgba(36,87,214,.22); outline-offset:2px; }
-    .drop-zone.dragging { border-color:var(--accent); background:#eef2fb; }
-    .upload-icon { width:34px; height:34px; border:1px solid #b9c5df; display:grid; place-items:center; color:var(--accent); font-size:20px; flex:0 0 auto; }
-    .upload-copy { min-width:0; }
-    .upload-copy strong { display:block; font-size:14px; margin-bottom:4px; }
-    .upload-controls { display:flex; flex-direction:column; gap:8px; }
-    .upload-controls label { font-size:12px; color:#6c7484; }
-    .upload-controls select { width:100%; padding:10px 12px; border:1px solid var(--line); background:#fff; font:inherit; }
-    .upload-status { grid-column:1 / -1; min-height:20px; font-size:13px; color:#4a5365; }
-    .upload-status.error { color:#a12d2d; }
-    .upload-list { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:8px; }
-    .upload-item { padding:6px 9px; border:1px solid #d7dfef; background:#fff; font-size:12px; word-break:break-all; }
-    .artifacts, .progress { display:flex; flex-direction:column; gap:8px; }
-    .artifacts a { color:#2457d6; text-decoration:none; word-break:break-all; }
-    .artifact-card { display:flex; flex-direction:column; gap:8px; padding:10px 12px; background:#fff; border:1px solid #e7e0d4; border-radius:12px; }
-    .artifact-preview { max-width:100%; border:1px solid #ddd6c8; border-radius:10px; background:#fff; }
-    .progress-item { padding:10px 12px; background:#fff; border:1px solid #e7e0d4; border-radius:12px; font-size:13px; line-height:1.45; }
-    .muted { color:#6c7484; font-size:13px; }
+    .secondary { border-color:var(--line); background:#fff; }
+    .icon-button { width:36px; padding:0; display:grid; place-items:center; font-size:18px; }
+    .chat { min-height:0; flex:1; overflow:auto; padding:26px clamp(18px,5vw,58px); display:flex; flex-direction:column; gap:12px; scroll-behavior:smooth; }
+    .empty-state { margin:auto; color:#9aa0a6; font-size:14px; }
+    .msg { max-width:78%; padding:11px 13px; border-radius:8px; white-space:pre-wrap; line-height:1.55; overflow-wrap:anywhere; }
+    .user { align-self:flex-end; background:var(--accent); color:#fff; }
+    .assistant { align-self:flex-start; border:1px solid var(--line); background:#fff; }
+    .system { align-self:flex-start; width:min(100%, 720px); max-width:92%; background:var(--soft); color:#666b70; font-size:13px; }
+    .system-title { margin-bottom:7px; color:#4b4f53; font-weight:650; }
+    .task-meta { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+    .status-dot { width:7px; height:7px; border-radius:50%; background:#9aa0a6; flex:0 0 auto; }
+    .status-dot.running { background:#5f7fc7; }
+    .status-dot.completed { background:#5d8b68; }
+    .status-dot.failed { background:#b45c5c; }
+    .progress-lines { display:flex; flex-direction:column; gap:5px; }
+    .progress-line { padding-left:12px; position:relative; }
+    .progress-line::before { content:""; position:absolute; left:1px; top:.65em; width:4px; height:4px; border-radius:50%; background:#aeb2b6; }
+    .artifact-list { display:flex; flex-direction:column; gap:7px; }
+    .artifact-card { padding:9px 10px; border:1px solid #d9dcdf; border-radius:6px; background:#fff; }
+    .artifact-card a { color:#2457d6; text-decoration:none; word-break:break-all; }
+    .artifact-preview { display:block; max-width:100%; max-height:320px; margin-top:8px; border:1px solid var(--line); border-radius:4px; background:#fff; object-fit:contain; }
+    .cloud-links { display:flex; gap:12px; flex-wrap:wrap; margin-top:7px; }
+    .cloud-links a { color:#2457d6; text-decoration:none; }
+    .checkpoint-message { background:#f2f2f1; color:#4d5156; }
+    .checkpoint-text { margin-bottom:10px; }
+    .feedback { width:100%; min-height:76px; resize:vertical; padding:10px 11px; border:1px solid #cfd2d4; border-radius:6px; background:#fff; color:var(--ink); }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:9px; }
+    .muted { color:var(--muted); font-size:12px; }
     .warning { color:var(--warn); }
-    @media (max-width: 900px) {
-      .layout { grid-template-columns: 1fr; }
-      .chat { border-right:0; border-bottom:1px solid var(--line); height:44vh; }
-      .upload-panel { grid-template-columns:1fr; }
-      .upload-status, .upload-list { grid-column:1; }
+    .composer-area { position:sticky; bottom:0; padding:10px clamp(18px,5vw,58px) 18px; border-top:1px solid var(--line); background:rgba(255,255,255,.97); }
+    .upload-status { min-height:18px; margin-bottom:5px; color:var(--muted); font-size:12px; }
+    .upload-status.error { color:var(--error); }
+    .upload-list { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:7px; }
+    .upload-list:empty { display:none; }
+    .upload-item { max-width:100%; padding:4px 7px; border:1px solid var(--line); border-radius:5px; background:#f7f7f7; color:#5f6368; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .composer { min-height:64px; display:grid; grid-template-columns:36px minmax(0,1fr) 38px; align-items:end; gap:7px; padding:8px; border:1px solid #c9cccf; border-radius:8px; background:#fff; transition:border-color .15s, box-shadow .15s, background .15s; }
+    .composer:focus-within { border-color:#899cc9; box-shadow:0 0 0 3px rgba(36,87,214,.08); }
+    .composer.dragging { border-color:var(--accent); box-shadow:0 0 0 3px rgba(36,87,214,.12); background:#f7f9ff; }
+    .composer textarea { width:100%; min-height:46px; max-height:180px; resize:none; padding:7px 3px; border:0; outline:0; background:transparent; color:var(--ink); line-height:1.5; }
+    .composer-action { width:36px; height:36px; border:0; border-radius:6px; display:grid; place-items:center; cursor:pointer; background:transparent; color:#5f6368; font-size:20px; }
+    .composer-action:hover { background:#f0f1f2; }
+    .send-action { background:var(--accent); color:#fff; }
+    .send-action:hover { background:#1f4bb7; }
+    @media (max-width:640px) {
+      .wrap { padding:0; }
+      .card { border:0; }
+      .topbar { padding:9px 12px; gap:9px; }
+      .session-input { display:none; }
+      .task-status { max-width:110px; }
+      .chat { padding:18px 12px; }
+      .msg { max-width:90%; }
+      .system { max-width:100%; }
+      .composer-area { padding:8px 10px 12px; }
+      .new-session-label { display:none; }
+      #new-session { width:36px; padding:0; font-size:20px; }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="card">
-      <div class="hero">
-        <h1>Research Agent</h1>
-        <p>这是科研智能体，不是通用聊天机器人。它面向文献调研、选题、实验、论文写作、审稿回复和研究记忆。</p>
-        <p>常用命令：<code>/review</code> <code>/idea</code> <code>/plan</code> <code>/code</code> <code>/write</code> <code>/rebuttal</code> <code>/fig</code> <code>/present</code> <code>/wiki</code></p>
-        <p><code>/present</code> 默认优先使用最近上传批次；可通过 <code>--type paper|stage</code> 和 <code>--source attachments|selected|session|workspace</code> 控制汇报类型与材料范围。</p>
-      </div>
-      <div class="toolbar">
-        <input id="session" placeholder="首次发消息后会显示 session id" readonly>
-        <input id="hint" value="例如：/idea 做一个关于科研写作智能体的选题；或直接问：你是谁？">
-      </div>
-      <div class="layout">
-        <div id="chat" class="chat"></div>
-        <div class="sidebar">
-          <div class="section">
-            <h3>当前状态</h3>
-            <div id="status" class="status">当前没有活动任务。</div>
-          </div>
-          <div class="section">
-            <h3>云端工作区</h3>
-            <div id="cloud-status" class="status">未启用云盘同步。</div>
-            <div id="cloud-links" class="cloud-links"></div>
-            <button id="cloud-sync" class="button secondary" type="button" title="同步当前会话到云盘" aria-label="同步当前会话到云盘">&#8635;</button>
-          </div>
-          <div class="section">
-            <h3>审核点</h3>
-            <div id="checkpoint" class="checkpoint-box muted">当前没有待审核的 checkpoint。</div>
-            <textarea id="feedback" class="feedback" placeholder="如果要打回修改，在这里写反馈。例如：请把实验设计更具体，补上评价指标。"></textarea>
-            <div id="actions" class="actions" hidden>
-              <button id="approve" class="button primary" type="button">批准继续</button>
-              <button id="revise" class="button secondary" type="button">发送修改意见</button>
-            </div>
-            <div class="muted">批准时可留空。打回修改时请填写具体意见。</div>
-          </div>
-          <div class="section">
-            <h3>中间进度</h3>
-            <div id="progress" class="progress">
-              <div class="progress-item muted">任务执行后，这里会显示路由、阶段开始、阶段完成、等待审核等中间步骤摘要。</div>
-            </div>
-          </div>
-          <div class="section">
-            <h3>最新产物</h3>
-            <div id="artifacts" class="artifacts">
-              <div class="muted">当前没有产物。</div>
-            </div>
-          </div>
+    <main class="card">
+      <header class="topbar">
+        <div class="brand">Research Agent</div>
+        <div class="session-meta">
+          <input id="session" class="session-input" placeholder="尚未创建会话" readonly>
+          <span id="status" class="task-status">就绪</span>
         </div>
+        <div class="header-actions">
+          <button id="cloud-sync" class="button secondary icon-button" type="button" title="同步当前会话到云盘" aria-label="同步当前会话到云盘">&#8635;</button>
+          <button id="new-session" class="button secondary" type="button" title="创建新会话"><span aria-hidden="true">+</span> <span class="new-session-label">新会话</span></button>
+        </div>
+      </header>
+      <div id="chat" class="chat" aria-live="polite">
+        <div id="empty-state" class="empty-state">开始新的研究会话</div>
       </div>
-      <div class="upload-panel">
-        <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="上传研究文件">
-          <span class="upload-icon" aria-hidden="true">&#8593;</span>
-          <div class="upload-copy">
-            <strong>拖拽文件到这里，或点击选择</strong>
-            <span class="muted">支持多文件；自动归档到当前会话工作区</span>
-          </div>
-        </div>
-        <div class="upload-controls">
-          <label for="upload-target">归档目录</label>
-          <select id="upload-target">
-            <option value="auto">自动分类</option>
-            <option value="bib">bib</option>
-            <option value="plan">plan</option>
-            <option value="idea">idea</option>
-            <option value="code">code</option>
-            <option value="figures">figures</option>
-            <option value="paper">paper</option>
-            <option value="presentation">presentation</option>
-            <option value="rebuttal">rebuttal</option>
-            <option value="wiki">wiki</option>
-            <option value="Content">Content</option>
-            <option value="logs">logs</option>
-          </select>
-        </div>
-        <input id="file-input" type="file" multiple hidden>
+      <footer class="composer-area">
         <div id="upload-status" class="upload-status" aria-live="polite"></div>
         <div id="upload-list" class="upload-list"></div>
-      </div>
-      <div class="composer">
-        <textarea id="prompt" placeholder="输入问题或命令。例如：/write 写一篇关于 retrieval-aware writing agents 的论文，默认输出 word 和 pdf"></textarea>
-        <button id="send" class="button primary" type="button">发送</button>
-      </div>
-    </div>
+        <div id="composer" class="composer">
+          <button id="attach-file" class="composer-action" type="button" title="选择文件" aria-label="选择文件">+</button>
+          <input id="file-input" type="file" multiple hidden>
+          <textarea id="prompt" rows="1" placeholder="输入问题或命令"></textarea>
+          <button id="send" class="composer-action send-action" type="button" title="发送" aria-label="发送">&#8593;</button>
+        </div>
+      </footer>
+    </main>
   </div>
   <script>
     const chat = document.getElementById("chat");
     const prompt = document.getElementById("prompt");
-    const feedbackEl = document.getElementById("feedback");
+    const composer = document.getElementById("composer");
+    const attachFileBtn = document.getElementById("attach-file");
     const send = document.getElementById("send");
     const sessionInput = document.getElementById("session");
+    const newSessionBtn = document.getElementById("new-session");
     const statusEl = document.getElementById("status");
-    const cloudStatusEl = document.getElementById("cloud-status");
-    const cloudLinksEl = document.getElementById("cloud-links");
     const cloudSyncBtn = document.getElementById("cloud-sync");
-    const checkpointEl = document.getElementById("checkpoint");
-    const artifactsEl = document.getElementById("artifacts");
-    const progressEl = document.getElementById("progress");
-    const actionsEl = document.getElementById("actions");
-    const approveBtn = document.getElementById("approve");
-    const reviseBtn = document.getElementById("revise");
-    const dropZone = document.getElementById("drop-zone");
     const fileInput = document.getElementById("file-input");
-    const uploadTarget = document.getElementById("upload-target");
     const uploadStatus = document.getElementById("upload-status");
     const uploadList = document.getElementById("upload-list");
     let currentTaskId = "";
     let currentCheckpoint = null;
     let uploadInProgress = false;
     let pollTimer = null;
+    let taskEventSource = null;
+    let renderedResponseTaskId = "";
+    let dragDepth = 0;
+
+    function removeEmptyState() {
+      document.getElementById("empty-state")?.remove();
+    }
 
     function renderMessage(role, content) {
+      removeEmptyState();
       const div = document.createElement("div");
       div.className = `msg ${role}`;
       div.textContent = content;
       chat.appendChild(div);
       chat.scrollTop = chat.scrollHeight;
+      return div;
     }
 
-    function renderArtifacts(artifacts) {
-      artifactsEl.innerHTML = "";
+    function systemMessage(key, title) {
+      removeEmptyState();
+      let block = chat.querySelector(`[data-system-key="${key}"]`);
+      if (!block) {
+        block = document.createElement("div");
+        block.className = "msg system";
+        block.dataset.systemKey = key;
+        chat.appendChild(block);
+      }
+      block.innerHTML = "";
+      if (title) {
+        const heading = document.createElement("div");
+        heading.className = "system-title";
+        heading.textContent = title;
+        block.appendChild(heading);
+      }
+      return block;
+    }
+
+    function removeSystemMessage(key) {
+      chat.querySelector(`[data-system-key="${key}"]`)?.remove();
+    }
+
+    function renderArtifacts(taskId, artifacts) {
+      const key = `artifacts-${taskId}`;
       if (!artifacts || artifacts.length === 0) {
-        artifactsEl.innerHTML = '<div class="muted">当前没有产物。</div>';
+        removeSystemMessage(key);
         return;
       }
+      const block = systemMessage(key, "最新产物");
+      const list = document.createElement("div");
+      list.className = "artifact-list";
       for (const artifact of artifacts) {
         const card = document.createElement("div");
         card.className = "artifact-card";
@@ -232,35 +220,62 @@ CHAT_PAGE = """<!doctype html>
           img.className = "artifact-preview";
           card.appendChild(img);
         }
-        artifactsEl.appendChild(card);
+        list.appendChild(card);
       }
+      block.appendChild(list);
+      chat.scrollTop = chat.scrollHeight;
     }
 
-    function renderProgress(progress) {
-      progressEl.innerHTML = "";
-      if (!progress || progress.length === 0) {
-        progressEl.innerHTML = '<div class="progress-item muted">当前没有中间进度摘要。</div>';
+    function renderProgress(data) {
+      if (!data.task_id) return;
+      const block = systemMessage(`progress-${data.task_id}`, "任务进度");
+      const meta = document.createElement("div");
+      meta.className = "task-meta";
+      const dot = document.createElement("span");
+      dot.className = `status-dot ${data.status || ""}`;
+      const summary = document.createElement("span");
+      const stage = data.current_stage_name || data.workflow_title || "准备中";
+      summary.textContent = `${data.command || "任务"} · ${data.status || "running"} · ${stage}`;
+      meta.append(dot, summary);
+      block.appendChild(meta);
+      const progress = data.progress || [];
+      const progressEvents = data.progress_events || [];
+      const items = progressEvents && progressEvents.length
+        ? progressEvents.map(item => `${item.kind || "progress"} · ${item.message}`)
+        : progress;
+      if (!items || items.length === 0) {
+        const pending = document.createElement("div");
+        pending.className = "muted";
+        pending.textContent = "正在准备任务...";
+        block.appendChild(pending);
         return;
       }
-      for (const item of progress) {
+      const lines = document.createElement("div");
+      lines.className = "progress-lines";
+      for (const item of items.slice(-12)) {
         const div = document.createElement("div");
-        div.className = "progress-item";
+        div.className = "progress-line";
         div.textContent = item;
-        progressEl.appendChild(div);
+        lines.appendChild(div);
       }
+      block.appendChild(lines);
+      chat.scrollTop = chat.scrollHeight;
     }
 
     function renderCloudWorkspace(cloud) {
-      cloudLinksEl.innerHTML = "";
-      if (!cloud || !cloud.status || cloud.status === "disabled") {
-        cloudStatusEl.textContent = "未启用云盘同步。";
+      if (!cloud || !cloud.status) return;
+      if (cloud.status === "disabled") {
+        removeSystemMessage("cloud-workspace");
         return;
       }
-      if (cloud.status === "error") {
-        cloudStatusEl.textContent = `同步失败：${cloud.error || "未知错误"}`;
-        return;
-      }
-      cloudStatusEl.textContent = `已同步 ${cloud.synced_files || 0} 个文件到 ${cloud.remote_path || "云盘"}`;
+      const block = systemMessage("cloud-workspace", "云端工作区");
+      const status = document.createElement("div");
+      status.textContent = cloud.status === "error"
+          ? `同步失败：${cloud.error || "未知错误"}`
+          : `已同步 ${cloud.synced_files || 0} 个文件到 ${cloud.remote_path || "云盘"}`;
+      block.appendChild(status);
+      const linksWrap = document.createElement("div");
+      linksWrap.className = "cloud-links";
       const links = [
         ["预览文件夹", cloud.preview_url || cloud.share_url],
         ["下载文件夹", cloud.download_url || cloud.share_url]
@@ -272,42 +287,98 @@ CHAT_PAGE = """<!doctype html>
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         link.textContent = label;
-        cloudLinksEl.appendChild(link);
+        linksWrap.appendChild(link);
       }
+      if (linksWrap.childElementCount) block.appendChild(linksWrap);
+      chat.scrollTop = chat.scrollHeight;
     }
 
     async function syncCloudWorkspace() {
       const sessionId = sessionInput.value.trim();
       if (!sessionId) {
-        cloudStatusEl.textContent = "请先创建会话或上传文件。";
+        renderMessage("system", "请先创建会话或上传文件，再同步云端工作区。");
         return;
       }
       cloudSyncBtn.disabled = true;
-      cloudStatusEl.textContent = "正在同步云端工作区...";
+      const block = systemMessage("cloud-workspace", "云端工作区");
+      block.append("正在同步...");
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/sync`, { method: "POST" });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "云盘同步失败");
         renderCloudWorkspace(data.cloud_workspace || {});
       } catch (error) {
-        cloudStatusEl.textContent = error.message || "云盘同步失败";
+        const errorBlock = systemMessage("cloud-workspace", "云端工作区");
+        errorBlock.append(error.message || "云盘同步失败");
       } finally {
         cloudSyncBtn.disabled = false;
       }
     }
 
     function renderCheckpoint(checkpoint) {
-      checkpointEl.classList.remove("warning");
+      const key = currentTaskId ? `checkpoint-${currentTaskId}` : "checkpoint";
       if (!checkpoint) {
-        checkpointEl.textContent = "当前没有待审核的 checkpoint。";
-        actionsEl.hidden = true;
+        removeSystemMessage(key);
         return;
       }
-      checkpointEl.textContent = checkpoint.prompt || checkpoint.title || "待审核";
-      actionsEl.hidden = false;
+      const block = systemMessage(key, checkpoint.title || "需要确认");
+      block.classList.add("checkpoint-message");
+      const text = document.createElement("div");
+      text.className = "checkpoint-text";
+      text.textContent = checkpoint.prompt || "请确认后继续。";
+      const feedback = document.createElement("textarea");
+      feedback.className = "feedback";
+      feedback.placeholder = "可填写修改意见；直接批准时可留空";
+      const actions = document.createElement("div");
+      actions.className = "actions";
+      const approve = document.createElement("button");
+      approve.type = "button";
+      approve.className = "button primary";
+      approve.textContent = "批准继续";
+      approve.addEventListener("click", () => approveTask(feedback, approve, revise));
+      const revise = document.createElement("button");
+      revise.type = "button";
+      revise.className = "button secondary";
+      revise.textContent = "发送修改意见";
+      revise.addEventListener("click", () => reviseTask(feedback, approve, revise, text));
+      actions.append(approve, revise);
+      block.append(text, feedback, actions);
+      chat.scrollTop = chat.scrollHeight;
     }
 
     cloudSyncBtn.addEventListener("click", syncCloudWorkspace);
+
+    async function createNewSession() {
+      newSessionBtn.disabled = true;
+      stopTaskPoll();
+      stopTaskStream();
+      try {
+        const response = await fetch("/api/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: "local" })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || `创建会话失败 (${response.status})`);
+        currentTaskId = "";
+        currentCheckpoint = null;
+        sessionInput.value = data.session_id;
+        localStorage.setItem("research-agent-session", data.session_id);
+        localStorage.removeItem("research-agent-task");
+        chat.innerHTML = "";
+        uploadList.innerHTML = "";
+        uploadStatus.classList.remove("error");
+        uploadStatus.textContent = "";
+        statusEl.textContent = "就绪";
+        renderCloudWorkspace(data.cloud_workspace || {});
+        renderMessage("assistant", `新会话已创建：${data.session_id}`);
+        prompt.focus();
+      } catch (error) {
+        renderMessage("assistant", String(error.message || error));
+      } finally {
+        newSessionBtn.disabled = false;
+      }
+    }
 
     function scheduleTaskPoll() {
       if (pollTimer || !currentTaskId) return;
@@ -320,6 +391,49 @@ CHAT_PAGE = """<!doctype html>
       pollTimer = null;
     }
 
+    function stopTaskStream() {
+      if (!taskEventSource) return;
+      taskEventSource.close();
+      taskEventSource = null;
+    }
+
+    function subscribeTaskStream(taskId) {
+      stopTaskStream();
+      if (!taskId || !window.EventSource) {
+        scheduleTaskPoll();
+        return;
+      }
+      taskEventSource = new EventSource(`/api/tasks/${encodeURIComponent(taskId)}/events`);
+      const handlePacket = event => {
+        try {
+          const packet = JSON.parse(event.data || "{}");
+          if (packet.task && packet.task.task_id === currentTaskId) {
+            renderState(packet.task, true);
+            if (packet.task.response_text && event.type === "done") {
+              if (renderedResponseTaskId !== packet.task.task_id) {
+                renderedResponseTaskId = packet.task.task_id;
+                renderMessage("assistant", packet.task.response_text);
+              }
+            }
+          }
+          if (["done", "error"].includes(event.type)) {
+            stopTaskStream();
+          }
+        } catch (error) {
+          renderMessage("system", `实时进度解析失败：${String(error.message || error)}`);
+        }
+      };
+      for (const eventName of ["snapshot", "progress", "done", "error"]) {
+        taskEventSource.addEventListener(eventName, handlePacket);
+      }
+      taskEventSource.onerror = () => {
+        if (!taskEventSource) return;
+        stopTaskStream();
+        renderMessage("system", "实时进度连接中断，已切换为状态轮询。" );
+        scheduleTaskPoll();
+      };
+    }
+
     async function pollTask() {
       pollTimer = null;
       if (!currentTaskId) return;
@@ -330,12 +444,12 @@ CHAT_PAGE = """<!doctype html>
         if (!response.ok) throw new Error(data.detail || `获取任务状态失败 (${response.status})`);
         if (taskId === currentTaskId) renderState(data);
       } catch (error) {
-        statusEl.textContent = `进度刷新失败：${String(error.message || error)}`;
+        renderMessage("system", `进度刷新失败：${String(error.message || error)}`);
         scheduleTaskPoll();
       }
     }
 
-    function renderState(data) {
+    function renderState(data, preserveStream = false) {
       currentTaskId = data.task_id || "";
       currentCheckpoint = data.checkpoint || null;
       if (data.session_id) {
@@ -344,14 +458,22 @@ CHAT_PAGE = """<!doctype html>
       }
       if (currentTaskId) localStorage.setItem("research-agent-task", currentTaskId);
       statusEl.textContent = currentTaskId
-        ? `Task ${currentTaskId} | ${data.command || ""} | ${data.status} | 当前阶段：${data.current_stage_name || data.workflow_title || "准备中"}`
-        : "当前没有活动任务。";
-      renderArtifacts(data.artifacts || []);
-      renderProgress(data.progress || []);
+        ? `${data.command || "任务"} · ${data.status || "running"}`
+        : "就绪";
+      renderProgress(data);
+      renderArtifacts(currentTaskId, data.artifacts || []);
       renderCloudWorkspace(data.cloud_workspace || {});
       renderCheckpoint(currentCheckpoint);
-      if (data.status === "running") scheduleTaskPoll();
-      else stopTaskPoll();
+      if (data.response_text && data.status === "completed" && renderedResponseTaskId !== data.task_id) {
+        renderedResponseTaskId = data.task_id;
+        renderMessage("assistant", data.response_text);
+      }
+      if (data.status === "running") {
+        if (!taskEventSource) subscribeTaskStream(currentTaskId);
+      } else if (!preserveStream) {
+        stopTaskPoll();
+        stopTaskStream();
+      }
     }
 
     async function restoreTaskState() {
@@ -375,7 +497,7 @@ CHAT_PAGE = """<!doctype html>
           if (detailResponse.ok) renderState(await detailResponse.json());
         }
       } catch (error) {
-        statusEl.textContent = `恢复任务状态失败：${String(error.message || error)}`;
+        renderMessage("system", `恢复任务状态失败：${String(error.message || error)}`);
       }
     }
 
@@ -399,22 +521,25 @@ CHAT_PAGE = """<!doctype html>
       const files = Array.from(fileList || []).filter(file => file.size > 0);
       if (!files.length || uploadInProgress) return;
       uploadInProgress = true;
-      dropZone.classList.remove("dragging");
+      composer.classList.remove("dragging");
       uploadStatus.classList.remove("error");
       uploadStatus.textContent = `正在上传 ${files.length} 个文件...`;
       const formData = new FormData();
       if (sessionInput.value) formData.append("session_id", sessionInput.value);
       formData.append("user_id", "local");
-      formData.append("target", uploadTarget.value);
+      formData.append("target", "auto");
       for (const file of files) formData.append("files", file, file.name);
       try {
         const response = await fetch("/api/session/files", { method: "POST", body: formData });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || `上传失败 (${response.status})`);
         sessionInput.value = data.session_id;
-        uploadStatus.textContent = `已上传 ${data.files.length} 个文件到 ${data.workspace_root}`;
+        localStorage.setItem("research-agent-session", data.session_id);
+        uploadStatus.textContent = `已上传 ${data.files.length} 个文件`;
         showUploadedFiles(data.files);
         renderCloudWorkspace(data.cloud_workspace || {});
+        const names = data.files.map(file => file.relative_path).join("\\n");
+        renderMessage("system", `文件已加入当前会话：\\n${names}`);
       } catch (error) {
         uploadStatus.classList.add("error");
         uploadStatus.textContent = String(error.message || error);
@@ -429,6 +554,7 @@ CHAT_PAGE = """<!doctype html>
       if (!text) return;
       renderMessage("user", text);
       prompt.value = "";
+      resizePrompt();
       send.disabled = true;
       try {
         const response = await fetch("/api/agent/chat", {
@@ -437,16 +563,18 @@ CHAT_PAGE = """<!doctype html>
           body: JSON.stringify({ session_id: sessionInput.value || null, message: text })
         });
         const data = await response.json();
-        renderMessage("assistant", data.text || data.detail || "No response");
+        if (!response.ok) throw new Error(data.detail || `请求失败 (${response.status})`);
         renderState(data);
+        if (!data.task_id) renderMessage("assistant", data.text || "No response");
+        if (data.task_id && data.status === "running") subscribeTaskStream(data.task_id);
       } catch (error) {
-        renderMessage("assistant", String(error));
+        renderMessage("assistant", String(error.message || error));
       } finally {
         send.disabled = false;
       }
     }
 
-    async function approveTask() {
+    async function approveTask(feedbackEl, approveBtn, reviseBtn) {
       if (!currentTaskId) return;
       approveBtn.disabled = true;
       reviseBtn.disabled = true;
@@ -458,7 +586,7 @@ CHAT_PAGE = """<!doctype html>
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || `审批失败 (${response.status})`);
-        renderMessage("assistant", data.text || "已批准，正在后台生成。请在右侧查看实时进度。");
+        renderMessage("system", data.text || "已批准，正在后台继续生成。" );
         feedbackEl.value = "";
         renderState(data);
       } catch (error) {
@@ -469,12 +597,12 @@ CHAT_PAGE = """<!doctype html>
       }
     }
 
-    async function reviseTask() {
+    async function reviseTask(feedbackEl, approveBtn, reviseBtn, checkpointText) {
       if (!currentTaskId) return;
       const feedback = feedbackEl.value.trim();
       if (!feedback) {
-        checkpointEl.textContent = "请先填写修改意见，再点击“发送修改意见”。";
-        checkpointEl.classList.add("warning");
+        checkpointText.textContent = "请先填写修改意见，再点击“发送修改意见”。";
+        checkpointText.classList.add("warning");
         return;
       }
       renderMessage("user", `修改意见：${feedback}`);
@@ -488,7 +616,7 @@ CHAT_PAGE = """<!doctype html>
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || `发送修改意见失败 (${response.status})`);
-        renderMessage("assistant", data.text || "修改意见已发送，正在后台重新生成。请在右侧查看实时进度。");
+        renderMessage("system", data.text || "修改意见已发送，正在后台重新生成。" );
         feedbackEl.value = "";
         renderState(data);
       } catch (error) {
@@ -500,35 +628,46 @@ CHAT_PAGE = """<!doctype html>
     }
 
     send.addEventListener("click", submit);
+    newSessionBtn.addEventListener("click", createNewSession);
+    attachFileBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => uploadFiles(fileInput.files));
+
+    function resizePrompt() {
+      prompt.style.height = "auto";
+      prompt.style.height = `${Math.min(prompt.scrollHeight, 180)}px`;
+    }
+
+    prompt.addEventListener("input", resizePrompt);
     prompt.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         submit();
       }
     });
-    approveBtn.addEventListener("click", approveTask);
-    reviseBtn.addEventListener("click", reviseTask);
-    dropZone.addEventListener("click", () => fileInput.click());
-    dropZone.addEventListener("keydown", event => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        fileInput.click();
-      }
-    });
-    fileInput.addEventListener("change", () => uploadFiles(fileInput.files));
-    document.addEventListener("dragover", event => {
+    composer.addEventListener("dragenter", event => {
       if (!event.dataTransfer || !Array.from(event.dataTransfer.types).includes("Files")) return;
       event.preventDefault();
-      dropZone.classList.add("dragging");
+      dragDepth += 1;
+      composer.classList.add("dragging");
     });
-    document.addEventListener("dragleave", event => {
-      if (!event.relatedTarget) dropZone.classList.remove("dragging");
+    composer.addEventListener("dragover", event => {
+      if (!event.dataTransfer || !Array.from(event.dataTransfer.types).includes("Files")) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
     });
-    document.addEventListener("drop", event => {
+    composer.addEventListener("dragleave", event => {
+      if (!event.dataTransfer || !Array.from(event.dataTransfer.types).includes("Files")) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) composer.classList.remove("dragging");
+    });
+    composer.addEventListener("drop", event => {
       if (!event.dataTransfer || !event.dataTransfer.files.length) return;
       event.preventDefault();
+      dragDepth = 0;
+      composer.classList.remove("dragging");
       uploadFiles(event.dataTransfer.files);
     });
+    resizePrompt();
     restoreTaskState();
   </script>
 </body>
@@ -555,9 +694,10 @@ def task_status_payload(task_id: str, *, text: str = "") -> dict[str, Any]:
     session = agent.store.load_session(task.session_id)
     payload.update(
         {
-            "text": text or task.summary or task.error,
+            "text": text or task.response_text or task.summary or task.error,
             "artifacts": [artifact.model_dump() for artifact in task.artifacts[-6:]],
             "progress": task.progress_log[-10:],
+            "progress_events": [event.model_dump() for event in task.progress_events[-50:]],
             "checkpoint": checkpoint.model_dump() if checkpoint else None,
             "cloud_workspace": session.cloud_workspace.model_dump() if session else {},
         }
@@ -565,9 +705,24 @@ def task_status_payload(task_id: str, *, text: str = "") -> dict[str, Any]:
     return payload
 
 
+def _sse_event(event_name: str, payload: dict[str, Any]) -> str:
+    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def require_public_api_key(authorization: str | None) -> None:
+    expected = config.public_api_key.strip()
+    if not expected:
+        return
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or token.strip() != expected:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
 async def run_task_in_background(task_id: str, operation: str, feedback: str) -> None:
     try:
-        if operation == "approve":
+        if operation == "start":
+            await agent.execute_task(task_id)
+        elif operation == "approve":
             await agent.approve_task(task_id, feedback)
         elif operation == "reject":
             await agent.reject_task(task_id, feedback)
@@ -614,6 +769,42 @@ app = FastAPI(title="research-agent-platform", version="0.4.0", lifespan=lifespa
 app.mount("/workspace-files", StaticFiles(directory=config.artifact_root), name="workspace-files")
 
 
+@app.get("/api/tasks/{task_id}/events")
+async def api_task_events(task_id: str) -> StreamingResponse:
+    if not agent.get_task(task_id):
+        raise HTTPException(status_code=404, detail=f"Unknown task: {task_id}")
+
+    async def event_stream():
+        last_sequence = 0
+        sent_snapshot = False
+        while True:
+            task = agent.get_task(task_id)
+            if task is None:
+                yield _sse_event("error", {"task_id": task_id, "error": "Unknown task"})
+                return
+            events = [event for event in task.progress_events if event.sequence > last_sequence]
+            if not sent_snapshot:
+                yield _sse_event("snapshot", {"task": task_status_payload(task_id)})
+                sent_snapshot = True
+            for event in events:
+                last_sequence = max(last_sequence, event.sequence)
+                yield _sse_event(
+                    "progress",
+                    {"task_id": task_id, "event": event.model_dump(), "task": task_status_payload(task_id)},
+                )
+            if task.status in {"completed", "failed", "waiting_human"}:
+                yield _sse_event("done", {"task": task_status_payload(task_id)})
+                return
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/")
 def root() -> RedirectResponse:
     return RedirectResponse(url="/chat")
@@ -626,18 +817,53 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "model": first_model, "workspace": config.artifact_root}
 
 
+@app.get("/api/cloud/config")
+def api_cloud_config() -> dict[str, Any]:
+    return {
+        **agent.cloud.configuration_status(),
+        "delivery_required": config.cloud_delivery_required,
+    }
+
+
 @app.get("/chat")
 def chat_page() -> HTMLResponse:
     return HTMLResponse(CHAT_PAGE)
 
 
+@app.post("/api/sessions")
+async def api_create_session(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    user_id = str((payload or {}).get("user_id") or "local")
+    session = agent.store.create_session(user_id)
+    workspace_root = agent.artifacts.session_root(
+        user_id=session.user_id,
+        session_id=session.session_id,
+    )
+    session.workspace_root = str(workspace_root.resolve())
+    agent.store.save_session(session)
+    cloud_workspace = await agent.sync_session_workspace(session)
+    return {
+        "session_id": session.session_id,
+        "user_id": session.user_id,
+        "workspace_root": session.workspace_root,
+        "cloud_workspace": cloud_workspace.model_dump(),
+    }
+
+
 @app.post("/api/agent/chat")
 async def api_agent_chat(payload: dict[str, Any]) -> dict[str, Any]:
-    return await agent.chat(
+    result = await agent.start_chat(
         payload.get("session_id"),
         str(payload.get("message", "")),
         str(payload.get("user_id") or "local"),
     )
+    task_id = result.get("task_id", "")
+    if task_id and result.get("status") == "running":
+        schedule_task(task_id, "start")
+        result["text"] = (
+            f"已创建任务 `{task_id}`，正在后台执行。"
+            "请查看右侧实时进度；如浏览器暂时断线，可重新打开页面恢复。"
+        )
+    return result
 
 
 @app.post("/api/session/files")
@@ -829,34 +1055,10 @@ async def api_resume(task_id: str) -> dict[str, Any]:
     return task_status_payload(task_id, text="任务已从断点恢复，正在后台继续生成。")
 
 
-@app.get("/v1/models")
-async def list_models() -> dict[str, Any]:
-    return await upstream_list_models()
-
-
-@app.post("/v1/chat/completions")
-async def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
-    messages = payload.get("messages", [])
-    session_id = None
-    user_id = "local"
-    metadata = payload.get("metadata")
-    if isinstance(metadata, dict):
-        session_id = metadata.get("session_id")
-        user_id = str(metadata.get("user_id") or metadata.get("user") or user_id)
-    if not session_id:
-        session_id = payload.get("user")
-    if user_id == "local" and payload.get("user"):
-        user_id = str(payload.get("user"))
-
-    latest_user = ""
-    for item in reversed(messages):
-        if item.get("role") == "user":
-            latest_user = extract_text_from_message(item.get("content", ""))
-            break
-    if not latest_user:
-        latest_user = "Please summarize the current task state."
-
-    agent_result = await agent.chat(session_id, latest_user, user_id)
+def chat_completion_payload(
+    payload: dict[str, Any],
+    agent_result: dict[str, Any],
+) -> dict[str, Any]:
     assistant_text = agent_result["text"]
     response_id = agent_result["task_id"] or agent_result["session_id"]
     return {
@@ -882,8 +1084,92 @@ async def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def chat_completion_stream_payload(
+    payload: dict[str, Any],
+    agent_result: dict[str, Any],
+) -> dict[str, Any]:
+    completion = chat_completion_payload(payload, agent_result)
+    choice = completion["choices"][0]
+    return {
+        "id": completion["id"],
+        "object": "chat.completion.chunk",
+        "created": completion["created"],
+        "model": completion["model"],
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": choice["message"]["content"],
+                },
+                "finish_reason": choice["finish_reason"],
+            }
+        ],
+        "usage": completion["usage"],
+        "x_agent_task": completion["x_agent_task"],
+    }
+
+
+def _openai_stream_chunk(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@app.get("/v1/models")
+async def list_models(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    require_public_api_key(authorization)
+    return await upstream_list_models()
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+):
+    require_public_api_key(authorization)
+    messages = payload.get("messages", [])
+    session_id = None
+    user_id = "local"
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        session_id = metadata.get("session_id")
+        user_id = str(metadata.get("user_id") or metadata.get("user") or user_id)
+    if not session_id:
+        session_id = payload.get("user")
+    if user_id == "local" and payload.get("user"):
+        user_id = str(payload.get("user"))
+
+    latest_user = ""
+    for item in reversed(messages):
+        if item.get("role") == "user":
+            latest_user = extract_text_from_message(item.get("content", ""))
+            break
+    if not latest_user:
+        latest_user = "Please summarize the current task state."
+
+    agent_result = await agent.chat(session_id, latest_user, user_id)
+    if payload.get("stream"):
+        async def event_stream():
+            yield _openai_stream_chunk(chat_completion_stream_payload(payload, agent_result))
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    return chat_completion_payload(payload, agent_result)
+
+
 @app.post("/v1/responses")
-async def responses(payload: dict[str, Any]) -> dict[str, Any]:
+async def responses(
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    require_public_api_key(authorization)
     session_id = None
     user_id = "local"
     metadata = payload.get("metadata")

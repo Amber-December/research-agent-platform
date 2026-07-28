@@ -9,6 +9,17 @@ from research_agent_platform import api as api_module
 from research_agent_platform import agent as agent_module
 
 
+BLOCKING_PRESENTATION_DECISION = (
+    "\n\n## Decision Required\n"
+    "Blocking: Yes\n"
+    "Question: Choose the external disclosure scope.\n"
+    "Why user input is necessary: This controls whether an unpublished result is disclosed.\n"
+    "Option A: Include the unpublished result.\n"
+    "Option B: Exclude the unpublished result.\n"
+    "Recommended Default: Option B.\n"
+)
+
+
 def test_openai_compatible_chat_completion_routes_to_task(service, monkeypatch):
     monkeypatch.setattr(api_module, "agent", service)
     client = TestClient(api_module.app)
@@ -31,6 +42,70 @@ def test_openai_compatible_chat_completion_routes_to_task(service, monkeypatch):
     task = service.get_task(payload["x_agent_task"]["task_id"])
     assert task is not None
     assert task.user_id == "qingxiaoda-user"
+
+
+def test_openai_compatible_chat_completion_streams_done_marker(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    client = TestClient(api_module.app)
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "research-agent-platform",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert "data: " in body
+    assert "chat.completion.chunk" in body
+    assert "data: [DONE]" in body
+
+
+def test_openai_compatible_chat_completion_handles_greeting_without_upstream_call(
+    service, monkeypatch
+):
+    monkeypatch.setattr(api_module, "agent", service)
+
+    async def fail_generate_text(**kwargs):
+        raise AssertionError("greeting probe should not call upstream text generation")
+
+    monkeypatch.setattr(agent_module, "generate_text", fail_generate_text)
+    client = TestClient(api_module.app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hello"}]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["choices"][0]["message"]["role"] == "assistant"
+    assert "科研智能体" in payload["choices"][0]["message"]["content"]
+
+
+def test_openai_compatible_endpoints_require_public_api_key_when_configured(
+    service, monkeypatch
+):
+    monkeypatch.setattr(api_module, "agent", service)
+    monkeypatch.setattr(api_module.config, "public_api_key", "secret-key")
+    client = TestClient(api_module.app)
+
+    missing = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hello"}]},
+    )
+    allowed = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer secret-key"},
+        json={"messages": [{"role": "user", "content": "hello"}]},
+    )
+
+    assert missing.status_code == 401
+    assert allowed.status_code == 200
 
 
 def test_openai_compatible_responses_and_task_files(service, monkeypatch):
@@ -96,6 +171,33 @@ def test_session_file_upload_creates_session_and_classifies_files(service, monke
         assert Path(item["absolute_path"]).exists()
 
 
+def test_create_session_initializes_workspace(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    client = TestClient(api_module.app)
+
+    response = client.post("/api/sessions", json={"user_id": "local"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"].startswith("session_")
+    workspace = Path(payload["workspace_root"])
+    assert workspace.exists()
+    for directory in (
+        "bib",
+        "plan",
+        "idea",
+        "code",
+        "figures",
+        "paper",
+        "presentation",
+        "rebuttal",
+        "wiki",
+        "Content",
+        "logs",
+    ):
+        assert (workspace / directory).is_dir()
+
+
 def test_session_file_upload_reuses_session_and_preserves_duplicate_names(service, monkeypatch):
     monkeypatch.setattr(api_module, "agent", service)
     client = TestClient(api_module.app)
@@ -116,6 +218,36 @@ def test_session_file_upload_reuses_session_and_preserves_duplicate_names(servic
     assert payload["session_id"] == first["session_id"]
     assert first["files"][0]["relative_path"] == "plan/uploads/notes.txt"
     assert payload["files"][0]["relative_path"] == "plan/uploads/notes_2.txt"
+
+
+def test_bib_pdf_upload_is_stored_under_papers(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    client = TestClient(api_module.app)
+
+    response = client.post(
+        "/api/session/files",
+        data={"target": "bib"},
+        files={"files": ("downloaded.pdf", b"%PDF-1.7\npaper", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["files"][0]["relative_path"] == "bib/papers/downloaded.pdf"
+    assert Path(payload["files"][0]["absolute_path"]).read_bytes().startswith(b"%PDF")
+
+
+def test_auto_upload_routes_paper_id_pdf_to_bib_papers(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    client = TestClient(api_module.app)
+
+    response = client.post(
+        "/api/session/files",
+        data={"target": "auto"},
+        files={"files": ("P001_method.pdf", b"%PDF-1.7\npaper", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["files"][0]["relative_path"] == "bib/papers/P001_method.pdf"
 
 
 def test_session_file_upload_rejects_invalid_target(service, monkeypatch):
@@ -158,7 +290,7 @@ def test_approve_returns_before_background_completion(service, monkeypatch):
                 temperature=temperature,
             )
             if "Current stage: Slides Outline" in user_prompt:
-                return content + "\n\n## Decision Required\n- Option A: concise\n- Option B: detailed\n"
+                return content + BLOCKING_PRESENTATION_DECISION
             return content
 
         monkeypatch.setattr(agent_module, "generate_text", generate_with_choices)
@@ -203,7 +335,7 @@ def test_background_failure_is_persisted(service, monkeypatch):
                 temperature=temperature,
             )
             if "Current stage: Slides Outline" in user_prompt:
-                return content + "\n\n## Decision Required\n- Option A: concise\n- Option B: detailed\n"
+                return content + BLOCKING_PRESENTATION_DECISION
             return content
 
         monkeypatch.setattr(agent_module, "generate_text", generate_with_choices)
@@ -238,7 +370,7 @@ def test_task_status_payload_supports_progress_polling(service, monkeypatch):
             temperature=temperature,
         )
         if "Current stage: Slides Outline" in user_prompt:
-            return content + "\n\n## Decision Required\n- Option A: concise\n- Option B: detailed\n"
+            return content + BLOCKING_PRESENTATION_DECISION
         return content
 
     monkeypatch.setattr(agent_module, "generate_text", generate_with_choices)
@@ -262,6 +394,14 @@ def test_chat_page_contains_task_polling_and_restore(service, monkeypatch):
     assert response.status_code == 200
     assert "setTimeout(pollTask, 1500)" in response.text
     assert "restoreTaskState();" in response.text
-    assert "已批准，正在后台生成" in response.text
-    assert ".actions[hidden] { display:none; }" in response.text
-    assert "--source attachments|selected|session|workspace" in response.text
+    assert "已批准，正在后台继续生成" in response.text
+    assert 'id="new-session"' in response.text
+    assert 'fetch("/api/sessions"' in response.text
+    assert 'id="attach-file"' in response.text
+    assert 'id="composer" class="composer"' in response.text
+    assert 'composer.addEventListener("drop"' in response.text
+    assert 'formData.append("target", "auto")' in response.text
+    assert 'className = "msg system"' in response.text
+    assert 'class="sidebar"' not in response.text
+    assert 'id="drop-zone"' not in response.text
+    assert 'id="upload-target"' not in response.text

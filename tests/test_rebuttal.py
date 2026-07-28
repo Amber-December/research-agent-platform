@@ -189,7 +189,13 @@ def test_rebuttal_checkpoints_only_for_mutually_exclusive_strategies(
                 "## Clarifications and Evidence-Based Disagreements\n- Possible.\n\n"
                 "## New Experiments or Analysis\n- Possible.\n\n"
                 "## Risks and Dependencies\n- Deadline.\n\n"
-                "## Decision Required\n- Option A: add the expensive experiment\n- Option B: narrow the paper claim"
+                "## Decision Required\n"
+                "Blocking: Yes\n"
+                "Question: Choose the response commitment.\n"
+                "Why user input is necessary: The choice changes cost and the manuscript claim.\n"
+                "Option A: add the expensive experiment\n"
+                "Option B: narrow the paper claim\n"
+                "Recommended Default: Option B."
             )
         return "# Rebuttal Artifact\n\n- Source-grounded output."
 

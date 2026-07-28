@@ -1,6 +1,6 @@
 # research-agent-platform
 
-Research agent platform aligned to the PRD and tech spec, grounded by ARIS skill documents from `Auto-claude-code-research-in-sleep`.
+Research agent platform aligned to the PRD and tech spec, grounded by the vendored ARIS skill documents under `skills/`.
 
 ## Layout
 
@@ -29,15 +29,16 @@ uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-di
 
 - Open `http://127.0.0.1:8000/chat`
 - The page talks to the local research-agent workflow, not a plain echo proxy
-- Human checkpoints can be approved or revised in the page
+- Human checkpoints are exceptional: the agent continues automatically unless the user explicitly asks it to wait or a material, unresolved choice requires the user. Approving accepts its recommended default; feedback can select another option.
 - Research materials can be dragged onto the chat page or selected with the file picker. Uploads are stored under the current session workspace without starting a workflow.
 - Files are written under `agent-workspace/<user_id>/<session_id>/` and exposed at `/workspace-files/...`
 - Local UI sessions use `agent-workspace/local/<session_id>/`; deployed clients can pass `metadata.user_id` for per-user isolation.
+- Task notes are session artifacts under `wiki/agent-notes/`; no model-generated research file is written to a separate project-level wiki.
 - See `docs/workspace-layout.md` for the ARIS-style workspace layout
 
 ## Research workflow commands
 
-- `/review` searches and synthesizes literature. It writes a research brief, literature review, evidence map, and research gaps under `bib/`.
+- `/review` first writes a reproducible query protocol, then runs multi-query scholarly retrieval, relevance filtering, DOI/arXiv/title de-duplication, and a traceability gate. Formal synthesis requires at least 10 admitted external or relevant local sources; otherwise it stops after the search and quality report instead of inventing a review.
 - `/idea` generates candidate ideas, stress-tests novelty and feasibility, and writes the selected direction under `idea/FINAL_IDEA.md`. It may use targeted literature search but does not create the experiment plan.
 - `/plan` turns `FINAL_IDEA` or a directly supplied research objective into `plan/RESEARCH_BLUEPRINT.md`, `plan/EXPERIMENT_PLAN.md`, and `plan/EXECUTION_CHECKLIST.md`.
 - `/write` freezes an attachment/session/workspace SourceSet, extracts stable evidence IDs, plans and drafts the paper, runs an independent self-review, produces an evidence-preserving revision, and writes deterministic citation/delivery reports before DOCX/PDF/TeX export.
@@ -45,6 +46,10 @@ uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-di
 - `/code`, `/fig`, `/present`, and `/wiki` continue implementation planning, figure production, presentation generation, and persistent research memory.
 
 Each command can run independently. When prior `/review` or `/idea` tasks exist in the same session, downstream commands prioritize their evidence map, research gaps, final idea, and research contract as handoff context.
+
+`/review` uses relevant files under `*/uploads/` as local literature, then queries OpenAlex, Semantic Scholar, and arXiv with the brief's 4-6 Chinese/English topic variants; configured Web of Science and CNKI sources are added automatically. Admitted records receive stable IDs such as `[P001]`. When a provider exposes an explicit public PDF URL, the agent downloads and validates it into `bib/papers/`, subject to `REVIEW_DOWNLOAD_LIMIT`, `REVIEW_DOWNLOAD_MAX_MB`, and `REVIEW_DOWNLOAD_TIMEOUT_SECONDS`; `bib/LITERATURE_DOWNLOADS.json` records downloaded, unavailable, skipped, and failed items. A provider outage or unavailable full text is reported as a coverage limitation, never interpreted as a research gap, and no paywall is bypassed.
+
+When a public PDF cannot be downloaded, `/review` also writes `bib/INSTITUTIONAL_ACCESS.md` and `bib/INSTITUTIONAL_ACCESS.json` with Tsinghua library gateway / off-campus access handoff links. Users must log in with their own institutional account. After downloading authorized PDFs, upload them with `target=bib`; PDF uploads to that target are stored in `bib/papers/` and can be reused by later `/review` runs as local literature.
 
 For `/rebuttal`, upload the completed paper and reviewer comments in the same session. Reviewer files whose names contain `review`, `reviewer`, `审稿`, or `评审` are routed to `rebuttal/uploads/`; paper files remain under `paper/uploads/`. Missing either input fails validation before model generation. Explicit `--paper` and `--review` paths can override automatic selection; workspace fallback accepts only filenames clearly marked as final/accepted/终稿/定稿.
 
@@ -57,7 +62,7 @@ For `/write`, `--source attachments|selected|session|workspace` is optional. Aut
 - `/present --type paper --source attachments 论文汇报` uses only the latest uploaded PDF, Word, spreadsheet, image, or presentation batch.
 - `/present --type stage --source workspace 阶段汇报` retrieves a limited, ranked set of relevant files from plans, figures, logs, notes, paper fragments, code, and other standard workspace directories.
 - `/present --source selected \`paper/draft.pdf\` \`figures/result.png\`` freezes only the named files or directories as the task SourceSet.
-- The workflow writes `presentation/SLIDES_OUTLINE.md`; it pauses only when the outline contains a genuine user choice that requires approval.
+- The workflow writes `presentation/SLIDES_OUTLINE.md`; it pauses only for a fully specified blocking choice that materially changes scope, cost, risk, claims, or an external commitment. Layout and wording preferences do not interrupt generation.
 - Source selection and extracted assets are recorded in `Content/PRESENTATION_SOURCE_SELECTION.json`, `Content/PRESENTATION_SOURCE_INDEX.md`, and `Content/PRESENTATION_ASSETS.json`.
 - PDF/Word/PPT images are extracted as original media. Reliable CSV/XLSX/Word tables become editable PowerPoint tables; PDF publication tables are retained as high-resolution original crops.
 - `gpt-image-2` renders complete standalone narrative pages under `presentation/generated/`; original figures and tables are independently laid out on evidence pages and never mixed with Image-2 pages.
@@ -76,14 +81,36 @@ For `/write`, `--source attachments|selected|session|workspace` is optional. Aut
 ## Optional Seafile cloud workspace
 
 - Set `CLOUD_SYNC_ENABLED=true` to mirror `agent-workspace/<user_id>/<session_id>/` to `SEAFILE_REMOTE_ROOT/<user_id>/<session_id>/`.
+- Set `CLOUD_DELIVERY_REQUIRED=true` in local or deployed environments where a workflow must not report successful delivery until Seafile returns a share link.
 - For Tsinghua Seafile, run `\.venv\Scripts\python.exe tools\configure_tsinghua_seafile.py` locally after changing any password previously sent through chat. The prompt hides the password, exchanges it for an API token, writes only the token to the ignored `.env`, and clears stored username/password fields.
 - The Agent creates the remote session directory when the workspace is initialized, then uploads changed files after every workflow stage, checkpoint, final delivery, and user upload.
 - `Content/CLOUD_SYNC.json` stores local file signatures so unchanged files are skipped on later syncs.
 - Configure an existing library with `SEAFILE_REPO_ID`, or let the connector find/create `SEAFILE_REPO_NAME` when the account permits it.
 - Prefer `SEAFILE_API_TOKEN`. `SEAFILE_USERNAME` and `SEAFILE_PASSWORD` are only a fallback for instances that support `/api2/auth-token/`; institutional single sign-on may require an API token or app-specific password.
-- When `SEAFILE_SHARE_LINKS=true`, API responses expose `cloud_workspace.preview_url` and `cloud_workspace.download_url`. The chat UI shows these links in the cloud workspace section.
+- When `SEAFILE_SHARE_LINKS=true`, API responses expose `cloud_workspace.preview_url` and `cloud_workspace.download_url`. Workflow replies also include the same Tsinghua cloud URL after every synchronized artifact/checkpoint response.
 - `POST /api/sessions/{session_id}/sync` and the sync icon in `/chat` trigger an immediate session upload and refresh the preview/download links.
+- `GET /api/cloud/config` reports whether cloud sync is disabled, missing credentials, or ready for a real connection. The connector performs a one-way, incremental local-workspace-to-Seafile mirror; it does not automatically delete remote files or pull remote edits back into the local workspace.
+
+## Streaming progress
+
+- Workflow commands submitted from `/chat` return a task immediately and run in the background.
+- The browser subscribes to `GET /api/tasks/{task_id}/events` via SSE and receives structured `snapshot`, `progress`, and `done` events. Polling remains the fallback when SSE is unavailable.
+- Events contain route, stage, retrieval counts, artifact paths, cloud-sync status, checkpoint status, and errors. They are an auditable progress trace, not the model's hidden chain-of-thought.
+- Ordinary questions submitted from the local chat page also use a lightweight `/chat` task, so the UI can show request analysis, model-call status, and answer completion in the same SSE panel. OpenAI-compatible `/v1/*` endpoints remain synchronous.
+- The UI never receives hidden chain-of-thought. It receives only safe operational milestones and the final answer.
 - Never commit `.env` or send the account password in chat. Real credentials remain in the local `.env`, which is excluded by `.gitignore`.
+
+### Enable a real Seafile sync
+
+The current checkout shows `disabled` because `.env` has no `CLOUD_SYNC_ENABLED` or Seafile credential. Run the local configuration helper in a terminal on the machine that runs the service:
+
+```powershell
+.\.venv\Scripts\python.exe tools\configure_tsinghua_seafile.py
+```
+
+It prompts for the account and hidden password, exchanges them for a Seafile API token, writes only that token to the ignored `.env`, and clears username/password fields. Restart the service after it succeeds. Verify `GET http://127.0.0.1:8000/api/cloud/config` reports `enabled: true` and `configured: true`; then create a session or click the cloud sync button. The service creates or reuses the `Research Agent` library, mirrors `agent-workspace/local/<session_id>/` to `research-agent/local/<session_id>/`, uploads changed files, and returns folder preview/download links.
+
+This implementation is a one-way incremental mirror from local workspace to Seafile. It does not delete remote files or pull remote edits into the local workspace automatically.
 
 ## Deploy
 
@@ -102,7 +129,9 @@ client = OpenAI(api_key="dummy", base_url="http://YOUR_HOST:8000/v1")
 
 ## Configure ARIS grounding
 
-Set `ARIS_REPO_ROOT` in `.env` if the ARIS repo is not at the default sibling path.
+ARIS skill documents are vendored into this repository under `skills/`, with shared templates under `templates/`. By default the platform resolves ARIS guidance from the project root, so the checkout is self-contained when shared.
+
+Set `ARIS_REPO_ROOT` in `.env` only if you intentionally want to override the bundled skills with another ARIS-compatible directory.
 
 ## Literature providers
 

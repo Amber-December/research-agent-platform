@@ -129,8 +129,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Use the user's objective and any /review evidence in the session to generate three distinct research "
                         "ideas. When no literature review exists, perform only the targeted novelty search supplied in context. "
                         "For each idea state the problem, mechanism, novelty thesis, expected contribution, feasibility, and main "
-                        "risk. Do not write an experiment plan. Under Decision Required, write None when one candidate is clearly "
-                        "recommended; list alternatives only when the user must choose between genuinely different directions."
+                        "risk. Do not write an experiment plan. Recommend one candidate and continue automatically. Use a blocking "
+                        "Decision Required only when directions entail materially different scope, cost, risk, or external commitments "
+                        "that cannot be resolved from evidence; ordinary topic preferences are not blocking."
                     ),
                     artifact_path="idea/IDEA_CANDIDATES.md",
                     artifact_kind="report",
@@ -220,7 +221,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                 StageDefinition(
                     name="implementation_plan",
                     title="Implementation Plan",
-                    instruction="Turn the approved idea into a concrete implementation brief: what to change, what to keep, which files to edit, how to configure the environment, which scripts to run, what data to touch, and how to validate success locally before any broader launch. Include explicit assumptions, dependencies, and a failure fallback. Use Decision Required only when multiple launch choices need the user; otherwise write None and continue automatically.",
+                    instruction="Turn the approved idea into a concrete implementation brief: what to change, what to keep, which files to edit, how to configure the environment, which scripts to run, what data to touch, and how to validate success locally before any broader launch. Include explicit assumptions, dependencies, and a failure fallback. Choose a conservative launch default automatically. Use a blocking Decision Required only for unresolved cost, safety, data-access, or external-commitment choices that the agent cannot authorize.",
                     artifact_path="code/IMPLEMENTATION_PLAN.md",
                     artifact_kind="plan",
                     required_sections=[
@@ -295,13 +296,17 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
         ),
         "/fig": WorkflowDefinition(
             command="/fig",
-            title="Figure Planning Workflow",
-            description="Design figure inventory and visual briefs.",
+            title="Figure Generation Workflow",
+            description="Generate a finished research figure from explicit data or with gpt-image-2.",
             stage_definitions=[
                 StageDefinition(
                     name="figure_inventory",
                     title="Figure Inventory",
-                    instruction="List the essential figures, tables, and diagrams required for the current research story, with rationale and data dependencies.",
+                    instruction=(
+                        "Identify the single highest-value final figure and its evidence dependencies. Inspect the supplied "
+                        "workspace context. If explicit tabular data is available, require a precise code-rendered chart; "
+                        "otherwise specify a scientific illustration suitable for gpt-image-2."
+                    ),
                     artifact_path="figures/FIGURE_INVENTORY.md",
                     artifact_kind="report",
                     required_sections=[
@@ -309,6 +314,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Data Dependencies",
                         "Narrative Purpose",
                         "Priority Order",
+                        "Render Mode",
                     ],
                     skill_paths=_skills(
                         "paper-figure",
@@ -321,7 +327,12 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                 StageDefinition(
                     name="figure_briefs",
                     title="Figure Briefs",
-                    instruction="Write detailed briefs for each high-priority figure so a human or downstream tool can implement them cleanly.",
+                    instruction=(
+                        "Write a production brief for the selected final figure. Declare exactly one render mode: `code` "
+                        "for explicit numeric data or `image2` for a scientific illustration. For code mode name the "
+                        "source file, columns, chart type, axes, units, and caption. For image2 mode define composition, "
+                        "labels, visual hierarchy, and scientific constraints."
+                    ),
                     artifact_path="figures/FIGURE_BRIEFS.md",
                     artifact_kind="plan",
                     required_sections=[
@@ -329,6 +340,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Data Fields",
                         "Design Notes",
                         "Caption Drafts",
+                        "Render Mode",
                     ],
                     skill_paths=_skills(
                         "paper-figure",
@@ -375,8 +387,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Produce an executable paper plan from the frozen evidence contract: target venue, core contribution, "
                         "outline, section responsibilities, paragraph jobs, claim-to-evidence IDs, missing evidence, figure/table "
-                        "needs, terminology, and writing order. Distinguish experimental papers from review articles. Put "
-                        "unresolved venue or story alternatives under Decision Required; otherwise write None."
+                        "needs, terminology, and writing order. Distinguish experimental papers from review articles. Select a "
+                        "defensible venue and story automatically. Use a blocking Decision Required only when mutually exclusive "
+                        "claims or external submission commitments cannot be resolved from the frozen evidence."
                     ),
                     artifact_path="paper/PAPER_PLAN.md",
                     artifact_kind="plan",
@@ -535,9 +548,12 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     name="research_brief",
                     title="Research Brief",
                     instruction=(
-                        "Turn the user's request into a bounded literature-review brief. Define the research question, scope, "
-                        "concept groups, search terms, source coverage, time range, and inclusion/exclusion criteria. Use the "
-                        "scholarly search bundle supplied in context as the first retrieval pass and clearly record provider gaps."
+                        "Turn the user's request into a bounded, reproducible retrieval protocol before any external search. "
+                        "Define the research question, review type, technical concept groups, time range, publication policy, "
+                        "and explicit inclusion/exclusion criteria. Under Search Strategy, provide exactly 4-6 query variants "
+                        "as standalone lines `Q1: ...` through `Q6: ...`: include the core topic, canonical English terminology, "
+                        "domain aliases, a recent-review query, and a foundational-work query. Plan a recent/foundational split. "
+                        "Do not claim retrieval coverage or provider success before the search has run."
                     ),
                     artifact_path="bib/RESEARCH_BRIEF.md",
                     artifact_kind="report",
@@ -546,6 +562,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Scope",
                         "Concept Groups",
                         "Search Strategy",
+                        "Foundational and Recent Split",
                         "Source Coverage",
                         "Inclusion and Exclusion Criteria",
                         "Retrieval Limitations",
@@ -564,15 +581,21 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     name="literature_synthesis",
                     title="Literature Synthesis",
                     instruction=(
-                        "Synthesize the retrieved and workspace literature into a structured review. Compare research families, "
-                        "methods, datasets, baselines, metrics, findings, contradictions, and limitations. Keep citations "
-                        "traceable to the supplied records and distinguish evidence from interpretation."
+                        "Use only the admitted retrieval records and extracted local literature. Start with a paper evidence table "
+                        "covering stable ID or local path, year, venue/status, problem, method, data or scenario, key finding, "
+                        "limitation, evidence depth, and relevance. Then synthesize by technical axis rather than search order, "
+                        "separating foundational from recent work and formal publications from preprints. Compare methods, datasets, "
+                        "baselines, metrics, contradictions, and deployment evidence. Every paper-level factual statement must cite "
+                        "a supplied stable ID such as [P001], or an exact local source path with page when available. Distinguish "
+                        "metadata/abstract evidence from full-text evidence. Provider failures are retrieval limitations, never domain facts."
                     ),
                     artifact_path="bib/LITERATURE_REVIEW.md",
                     artifact_kind="report",
                     required_sections=[
                         "Executive Summary",
+                        "Paper Evidence Table",
                         "Research Landscape",
+                        "Foundational and Recent Work",
                         "Methods and Datasets",
                         "Baselines and Metrics",
                         "Key Findings",
@@ -592,7 +615,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Convert the literature synthesis into an evidence map for downstream /idea and /plan workflows. For each "
                         "important claim or open question, list supporting evidence, opposing or weak evidence, methods, datasets, "
-                        "baselines, metrics, confidence, and source pointers."
+                        "baselines, metrics, confidence, evidence depth, and source pointers. Every claim row must contain admitted "
+                        "stable IDs or exact local paths. Calibrate confidence from independent source count, agreement, and whether "
+                        "the evidence is full text or metadata/abstract only; do not infer confidence from citation count alone."
                     ),
                     artifact_path="bib/EVIDENCE_MAP.md",
                     artifact_kind="report",
@@ -617,7 +642,10 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Identify defensible research gaps, unresolved disputes, missing comparisons, under-tested assumptions, "
                         "and practical opportunities from the evidence map. Separate well-supported gaps from speculative "
-                        "opportunities and provide explicit handoff guidance for /idea and /plan."
+                        "opportunities and provide explicit handoff guidance for /idea and /plan. Cite every supported gap with "
+                        "admitted IDs or exact local paths and state the chain from observed evidence to gap. Distinguish evidence "
+                        "of absence from absence of evidence. Provider outages, missing APIs, and sparse retrieval are coverage "
+                        "limitations, not research gaps."
                     ),
                     artifact_path="bib/RESEARCH_GAPS.md",
                     artifact_kind="report",
@@ -634,6 +662,92 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "novelty-check",
                         "kill-argument",
                         "research-review",
+                    ),
+                ),
+            ],
+        ),
+        "/download": WorkflowDefinition(
+            command="/download",
+            title="Paper Download Workflow",
+            description="Freeze a source set, resolve public PDF targets, and download them into the workspace.",
+            stage_definitions=[
+                StageDefinition(
+                    name="download_plan",
+                    title="Download Plan",
+                    instruction=(
+                        "Freeze the download SourceSet before any retrieval. Identify the source files, paper titles, DOI "
+                        "targets, URL targets, and query terms that will guide public PDF lookup. Do not claim that any "
+                        "paper has been downloaded yet."
+                    ),
+                    artifact_path="bib/DOWNLOAD_PLAN.md",
+                    artifact_kind="plan",
+                    required_sections=[
+                        "Source Boundary",
+                        "Target Papers",
+                        "Query Terms",
+                        "Download Policy",
+                        "Risk Controls",
+                    ],
+                    skill_paths=_skills(
+                        "research-lit",
+                        "prior-art-search",
+                        "openalex",
+                        "semantic-scholar",
+                        "arxiv",
+                        "deepxiv",
+                        "comm-lit-review",
+                    ),
+                ),
+                StageDefinition(
+                    name="download_search",
+                    title="Download Search",
+                    instruction=(
+                        "Use the frozen source set to locate public PDFs and candidate URLs. Prefer exact matches on title, "
+                        "DOI, or source URLs. Record what was found, what is still missing, and whether a public PDF seems "
+                        "available."
+                    ),
+                    artifact_path="bib/DOWNLOAD_SEARCH.md",
+                    artifact_kind="report",
+                    required_sections=[
+                        "Query Plan",
+                        "Source File Summary",
+                        "Candidate Public PDFs",
+                        "Unresolved Items",
+                    ],
+                    skill_paths=_skills(
+                        "research-lit",
+                        "prior-art-search",
+                        "openalex",
+                        "semantic-scholar",
+                        "arxiv",
+                        "deepxiv",
+                        "citation-audit",
+                    ),
+                ),
+                StageDefinition(
+                    name="download_fetch",
+                    title="Download Fetch",
+                    instruction=(
+                        "Download the resolved public PDFs into the workspace and summarize the outcome. Only report files "
+                        "that were actually retrieved, and keep failed or unavailable items explicit."
+                    ),
+                    artifact_path="bib/DOWNLOAD_REPORT.md",
+                    artifact_kind="report",
+                    required_sections=[
+                        "Downloaded PDFs",
+                        "Failed Downloads",
+                        "Invalid PDFs",
+                        "No Public PDF",
+                        "Manifest Summary",
+                    ],
+                    skill_paths=_skills(
+                        "research-lit",
+                        "prior-art-search",
+                        "openalex",
+                        "semantic-scholar",
+                        "arxiv",
+                        "deepxiv",
+                        "citation-audit",
                     ),
                 ),
             ],
@@ -697,8 +811,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Choose a response strategy for every mapped comment: accept, partially accept, clarify, respectfully "
                         "disagree with evidence, or add experiments/analysis. Recommend one default path and explain the evidence "
-                        "needed. Under Decision Required, write None unless two or more genuinely mutually exclusive strategies "
-                        "cannot be resolved from the paper and reviews and require the author to choose."
+                        "needed. Choose the evidence-supported response automatically. Use a blocking Decision Required only when "
+                        "mutually exclusive strategies change claims, experiment commitments, cost, or risk and cannot be resolved "
+                        "from the paper and reviews."
                     ),
                     artifact_path="rebuttal/RESPONSE_STRATEGY.md",
                     artifact_kind="review",
@@ -855,8 +970,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Use evidence only for a separate original-figure or original-table page and provide exactly one primary "
                         "asset_id whenever possible. Never assign a paper figure or table to the cover. Never mix Image-2 artwork "
                         "and an original evidence asset on the same page. Aim for roughly 60-75% image2_full pages and 25-40% "
-                        "evidence pages, adapting to the material. Under Decision Required, write None unless two or more genuine "
-                        "narrative or design alternatives require the user to choose."
+                        "evidence pages, adapting to the material. Resolve narrative and design choices automatically. Use a "
+                        "blocking Decision Required only when the alternatives materially change claims, audience, disclosure, "
+                        "cost, or external commitments; layout and style preferences never block deck generation."
                     ),
                     artifact_path="presentation/SLIDES_OUTLINE.md",
                     artifact_kind="slides",

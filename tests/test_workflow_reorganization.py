@@ -6,9 +6,12 @@ from pathlib import Path
 
 import httpx
 
+from research_agent_platform import agent as agent_module
 from research_agent_platform.agent import ResearchAgentService
+from research_agent_platform.config import config
 from research_agent_platform.connectors.seafile import SeafileWorkspaceSync
 from research_agent_platform.graphs.workflows import workflow_registry
+from research_agent_platform.models import ChatSession, CloudWorkspaceState, TaskRun
 from research_agent_platform.router.intent import route_message
 
 
@@ -79,10 +82,7 @@ def test_seafile_workspace_sync_is_incremental(tmp_path: Path):
             uploads.append(request.content.decode("latin-1"))
             return httpx.Response(200, json={"id": "file-id"})
         if request.url.path == "/api/v2.1/share-links/":
-            return httpx.Response(
-                200,
-                json=[{"link": "https://cloud.example/d/shared-session"}],
-            )
+            return httpx.Response(200, json=[{"link": "https://cloud.example/d/shared-session"}])
         raise AssertionError(f"Unexpected Seafile request: {request.method} {request.url}")
 
     sync = SeafileWorkspaceSync(
@@ -94,12 +94,8 @@ def test_seafile_workspace_sync_is_incremental(tmp_path: Path):
         transport=httpx.MockTransport(handler),
     )
 
-    first = asyncio.run(
-        sync.sync_workspace(workspace, user_id="local", session_id="session_demo")
-    )
-    second = asyncio.run(
-        sync.sync_workspace(workspace, user_id="local", session_id="session_demo")
-    )
+    first = asyncio.run(sync.sync_workspace(workspace, user_id="local", session_id="session_demo"))
+    second = asyncio.run(sync.sync_workspace(workspace, user_id="local", session_id="session_demo"))
 
     assert first.status == "synced"
     assert first.remote_path == "/research-agent/local/session_demo"
@@ -109,6 +105,80 @@ def test_seafile_workspace_sync_is_incremental(tmp_path: Path):
     assert len(uploads) == 1
     state = json.loads((workspace / "Content" / "CLOUD_SYNC.json").read_text(encoding="utf-8"))
     assert state["file_signatures"]["paper/draft.md"]
+
+
+def test_completed_reply_includes_cloud_delivery_link(service: ResearchAgentService):
+    session = service.store.create_session()
+    session.cloud_workspace = CloudWorkspaceState(
+        status="synced",
+        configured=True,
+        preview_url="https://cloud.example/d/session-link",
+        download_url="https://cloud.example/d/session-link",
+    )
+    service.store.save_session(session)
+    assert service.store.list_tasks(session.session_id) == []
+
+    run = TaskRun(
+        session_id=session.session_id,
+        command="/fig",
+        objective="figure",
+        route_source="explicit",
+        workflow_title="Figure Generation Workflow",
+        status="completed",
+        artifact_root=session.workspace_root,
+    )
+    service.store.save_task(run)
+
+    reply = service._build_reply(run, text="图表已生成。")
+
+    assert "清华网盘预览/下载链接" in reply["text"]
+    assert "https://cloud.example/d/session-link" in reply["text"]
+
+
+def test_required_cloud_delivery_fails_without_share_link(service: ResearchAgentService, monkeypatch):
+    monkeypatch.setattr(config, "cloud_delivery_required", True)
+    session = service.store.create_session()
+    run = TaskRun(
+        session_id=session.session_id,
+        command="/fig",
+        objective="figure",
+        route_source="explicit",
+        workflow_title="Figure Generation Workflow",
+        status="completed",
+        artifact_root=session.workspace_root,
+    )
+    service.store.save_task(run)
+
+    service.enforce_cloud_delivery(run, CloudWorkspaceState(status="error", error="share link unavailable"))
+
+    failed = service.get_task(run.task_id)
+    assert failed is not None
+    assert failed.status == "failed"
+    assert "清华网盘交付失败" in failed.error
+
+
+def test_workflow_completes_only_after_cloud_link_is_ready(service: ResearchAgentService, monkeypatch):
+    observed_statuses: list[str] = []
+
+    async def delayed_cloud_sync(task):
+        latest = service.get_task(task.task_id)
+        observed_statuses.append(latest.status if latest else "missing")
+        session = service.store.load_session(task.session_id)
+        assert session is not None
+        session.cloud_workspace = CloudWorkspaceState(
+            status="synced",
+            configured=True,
+            preview_url="https://cloud.example/d/ready",
+        )
+        service.store.save_session(session)
+        return session.cloud_workspace
+
+    monkeypatch.setattr(service, "sync_task_workspace", delayed_cloud_sync)
+    result = asyncio.run(service.chat(None, "/plan 制定实验方案"))
+
+    assert "running" in observed_statuses
+    assert result["status"] == "completed"
+    assert "https://cloud.example/d/ready" in result["text"]
 
 
 def test_plan_does_not_trigger_literature_search(service: ResearchAgentService, monkeypatch):
@@ -144,3 +214,69 @@ def test_idea_reuses_existing_review_evidence(service: ResearchAgentService, mon
 
     assert result["status"] == "completed"
     assert calls == 0
+
+
+def test_figure_prompt_uses_session_context(service: ResearchAgentService, monkeypatch):
+    session = service.store.create_session()
+    workspace = Path(session.workspace_root)
+    note = workspace / "paper" / "PAPER_DRAFT.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("urban fringe topic", encoding="utf-8")
+    task = TaskRun(
+        session_id=session.session_id,
+        command="/fig",
+        objective="draw a figure",
+        route_source="explicit",
+        workflow_title="Figure Generation Workflow",
+        artifact_root=session.workspace_root,
+    )
+    service.store.save_session(session)
+    service.store.save_task(task)
+
+    captured: dict[str, str] = {}
+
+    async def fake_generate_text(*, system_prompt: str, user_prompt: str, model=None, temperature=None):
+        captured["user_prompt"] = user_prompt
+        return "Figure prompt"
+
+    monkeypatch.setattr(agent_module, "generate_text", fake_generate_text)
+    prompt = asyncio.run(service._build_figure_render_prompt(task, "inventory", "briefs"))
+
+    assert prompt == "Figure prompt"
+    assert "urban fringe topic" in captured["user_prompt"]
+
+
+def test_presentation_pipeline_passes_session_context(service: ResearchAgentService, monkeypatch):
+    session = service.store.create_session()
+    workspace = Path(session.workspace_root)
+    (workspace / "presentation").mkdir(parents=True, exist_ok=True)
+    (workspace / "Content").mkdir(parents=True, exist_ok=True)
+    (workspace / "presentation" / "SLIDE_CONTENT.md").write_text(
+        "## Slide 1: Result\n### Main Message\n- Show the urban fringe topic.\n",
+        encoding="utf-8",
+    )
+    (workspace / "presentation" / "SLIDES_OUTLINE.md").write_text(
+        "## Slide 1: Result\n### Main Message\n- Show the urban fringe topic.\n",
+        encoding="utf-8",
+    )
+    task = TaskRun(
+        session_id=session.session_id,
+        command="/present",
+        objective="make a ppt",
+        route_source="explicit",
+        workflow_title="Presentation Workflow",
+        artifact_root=session.workspace_root,
+    )
+    service.store.save_session(session)
+    service.store.save_task(task)
+
+    recorded: dict[str, str] = {}
+
+    def fake_build_slide_prompt(slide, template, mode, asset=None):
+        recorded["slide_title"] = slide.title
+        return "slide prompt"
+
+    monkeypatch.setattr(agent_module, "build_slide_prompt", fake_build_slide_prompt)
+    asyncio.run(service._write_presentation_delivery_artifacts(task))
+
+    assert recorded["slide_title"] == "Result"

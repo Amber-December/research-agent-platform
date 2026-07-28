@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
@@ -10,7 +12,7 @@ import httpx
 
 OPENALEX_URL = "https://api.openalex.org/works"
 SEMANTIC_SCHOLAR_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
-ARXIV_URL = "http://export.arxiv.org/api/query"
+ARXIV_URL = "https://export.arxiv.org/api/query"
 WOS_DEFAULT_BASE_URL = "https://api.clarivate.com/apis/wos-starter/v1"
 
 
@@ -25,12 +27,22 @@ class PaperRecord:
     citation_count: int | None
     sources: list[str] = field(default_factory=list)
     identifiers: dict[str, str] = field(default_factory=dict)
+    paper_id: str = ""
+    relevance_score: float = 0.0
+    matched_queries: list[str] = field(default_factory=list)
+    verification_status: str = "source_metadata"
+    pdf_url: str = ""
+    download_status: str = "not_attempted"
+    downloaded_path: str = ""
+    download_error: str = ""
 
     def merge(self, other: "PaperRecord") -> None:
         if not self.abstract and other.abstract:
             self.abstract = other.abstract
         if not self.url and other.url:
             self.url = other.url
+        if not self.pdf_url and other.pdf_url:
+            self.pdf_url = other.pdf_url
         if not self.venue and other.venue:
             self.venue = other.venue
         if self.year is None and other.year is not None:
@@ -43,6 +55,18 @@ class PaperRecord:
             if source not in self.sources:
                 self.sources.append(source)
         self.identifiers.update({k: v for k, v in other.identifiers.items() if v})
+        for query in other.matched_queries:
+            if query not in self.matched_queries:
+                self.matched_queries.append(query)
+        self.relevance_score = max(self.relevance_score, other.relevance_score)
+        if other.download_status == "downloaded":
+            self.download_status = other.download_status
+            self.downloaded_path = other.downloaded_path
+            self.download_error = other.download_error
+        elif self.download_status == "not_attempted" and other.download_status != "not_attempted":
+            self.download_status = other.download_status
+            self.downloaded_path = other.downloaded_path
+            self.download_error = other.download_error
 
 
 @dataclass
@@ -50,12 +74,19 @@ class LiteratureBundle:
     query: str
     papers: list[PaperRecord]
     provider_status: dict[str, str]
+    queries: list[str] = field(default_factory=list)
+    excluded_count: int = 0
+    quality: dict[str, object] = field(default_factory=dict)
 
     def to_markdown(self) -> str:
         lines = [
             "# Literature Search Bundle",
             "",
             f"- Query: {self.query}",
+            f"- Expanded queries: {', '.join(self.queries) or self.query}",
+            f"- Retrieval quality: {self.quality.get('status', 'unknown')}",
+            f"- Relevant papers retained: {len(self.papers)}",
+            f"- Irrelevant candidates excluded: {self.excluded_count}",
             "",
             "## Provider Status",
         ]
@@ -72,14 +103,22 @@ class LiteratureBundle:
             lines.extend(
                 [
                     "",
-                    f"### {index}. {title}{year}",
+                    f"### [{paper.paper_id or f'P{index:03d}'}] {title}{year}",
                     f"- Sources: {', '.join(paper.sources) or 'unknown'}",
+                    f"- Matched queries: {', '.join(paper.matched_queries) or 'unknown'}",
+                    f"- Relevance score: {paper.relevance_score:.3f}",
+                    f"- Traceability: {paper.verification_status}",
                     f"- Authors: {', '.join(paper.authors[:8]) or 'unknown'}",
                     f"- Venue: {paper.venue or 'unknown'}",
                     f"- Citations: {paper.citation_count if paper.citation_count is not None else 'unknown'}",
                     f"- URL: {paper.url or 'unknown'}",
+                    f"- Public PDF: {paper.pdf_url or 'not advertised'}",
+                    f"- Download: {paper.download_status}"
+                    + (f" (`{paper.downloaded_path}`)" if paper.downloaded_path else ""),
                 ]
             )
+            if paper.download_error:
+                lines.append(f"- Download note: {paper.download_error}")
             if paper.identifiers:
                 identifiers = ", ".join(f"{key}={value}" for key, value in paper.identifiers.items())
                 lines.append(f"- Identifiers: {identifiers}")
@@ -90,7 +129,10 @@ class LiteratureBundle:
     def to_json(self) -> str:
         payload = {
             "query": self.query,
+            "queries": self.queries,
             "provider_status": self.provider_status,
+            "excluded_count": self.excluded_count,
+            "quality": self.quality,
             "papers": [asdict(item) for item in self.papers],
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -112,6 +154,8 @@ class ScholarSearchService:
         cnki_api_key: str = "",
         cnki_auth_header: str = "X-ApiKey",
         cnki_auth_scheme: str = "",
+        minimum_for_synthesis: int = 10,
+        recommended_for_review: int = 15,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.wos_api_base_url = wos_api_base_url.rstrip("/")
@@ -122,64 +166,142 @@ class ScholarSearchService:
         self.cnki_api_key = cnki_api_key.strip()
         self.cnki_auth_header = cnki_auth_header.strip() or "X-ApiKey"
         self.cnki_auth_scheme = cnki_auth_scheme.strip()
+        self.minimum_for_synthesis = max(1, minimum_for_synthesis)
+        self.recommended_for_review = max(self.minimum_for_synthesis, recommended_for_review)
 
-    async def search_bundle(self, query: str, *, per_source_limit: int = 4) -> LiteratureBundle:
+    async def search_bundle(
+        self,
+        query: str,
+        *,
+        queries: list[str] | None = None,
+        per_source_limit: int = 8,
+        max_papers: int = 24,
+    ) -> LiteratureBundle:
         provider_status: dict[str, str] = {}
         merged: dict[str, PaperRecord] = {}
+        canonical_by_alias: dict[str, str] = {}
+        planned_queries = _deduplicate_queries(queries or [query])[:6]
+        provider_counts: dict[str, int] = {}
+        provider_errors: dict[str, int] = {}
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds, headers={"User-Agent": "research-agent-platform"}) as client:
-            openalex_records = await self._safe_fetch(
-                provider_status, "openalex", self._search_openalex, client, query, per_source_limit
-            )
-            semantic_records = await self._safe_fetch(
-                provider_status, "semantic_scholar", self._search_semantic_scholar, client, query, per_source_limit
-            )
-            arxiv_records = await self._safe_fetch(
-                provider_status, "arxiv", self._search_arxiv, client, query, per_source_limit
-            )
+            providers = [
+                ("openalex", self._search_openalex),
+                ("semantic_scholar", self._search_semantic_scholar),
+                ("arxiv", self._search_arxiv),
+            ]
             if self.wos_api_key:
-                wos_records = await self._safe_fetch(
-                    provider_status, "wos", self._search_wos, client, query, per_source_limit
-                )
+                providers.append(("wos", self._search_wos))
             else:
                 provider_status["wos"] = "disabled: missing WOS_API_KEY"
-                wos_records = []
             if self.cnki_search_endpoint:
-                cnki_records = await self._safe_fetch(
-                    provider_status, "cnki", self._search_cnki, client, query, per_source_limit
-                )
+                providers.append(("cnki", self._search_cnki))
             else:
                 provider_status["cnki"] = "disabled: missing CNKI_SEARCH_ENDPOINT"
-                cnki_records = []
 
-        for group in (openalex_records, semantic_records, arxiv_records, wos_records, cnki_records):
-            for record in group:
-                key = self._normalize_title(record.title)
-                if not key:
+            runs = await asyncio.gather(
+                *(
+                    self._safe_fetch(name, fetch, client, planned_query, per_source_limit)
+                    for planned_query in planned_queries
+                    for name, fetch in providers
+                )
+            )
+
+        for name, planned_query, records, error in runs:
+            if error:
+                provider_errors[name] = provider_errors.get(name, 0) + 1
+            else:
+                provider_counts[name] = provider_counts.get(name, 0) + len(records)
+            for record in records:
+                record.matched_queries.append(planned_query)
+                aliases = _paper_aliases(record)
+                if not aliases:
                     continue
-                if key in merged:
-                    merged[key].merge(record)
+                existing_keys = list(
+                    dict.fromkeys(canonical_by_alias[alias] for alias in aliases if alias in canonical_by_alias)
+                )
+                if existing_keys:
+                    existing_key = existing_keys[0]
+                    for duplicate_key in existing_keys[1:]:
+                        merged[existing_key].merge(merged.pop(duplicate_key))
+                        for alias, canonical_key in list(canonical_by_alias.items()):
+                            if canonical_key == duplicate_key:
+                                canonical_by_alias[alias] = existing_key
+                    merged[existing_key].merge(record)
+                    for alias in aliases:
+                        canonical_by_alias[alias] = existing_key
                 else:
-                    merged[key] = record
+                    canonical_key = aliases[0]
+                    merged[canonical_key] = record
+                    for alias in aliases:
+                        canonical_by_alias[alias] = canonical_key
 
+        for name, _ in providers:
+            successes = len(planned_queries) - provider_errors.get(name, 0)
+            provider_status[name] = (
+                f"ok ({provider_counts.get(name, 0)} records across {successes}/{len(planned_queries)} queries)"
+                if successes
+                else f"error ({provider_errors.get(name, 0)}/{len(planned_queries)} queries failed)"
+            )
+
+        candidates = list(merged.values())
+        for record in candidates:
+            record.relevance_score = _paper_relevance(record, planned_queries)
+            record.verification_status = (
+                "traceable_identifier" if record.identifiers or record.url else "unverified_metadata"
+            )
+        relevant = [record for record in candidates if record.relevance_score >= 0.34]
         papers = sorted(
-            merged.values(),
+            relevant,
             key=lambda item: (
+                -item.relevance_score,
                 -(item.citation_count or 0),
                 -(item.year or 0),
                 item.title.lower(),
             ),
         )
-        return LiteratureBundle(query=query, papers=papers[:8], provider_status=provider_status)
+        papers = papers[:max_papers]
+        for index, paper in enumerate(papers, start=1):
+            paper.paper_id = f"P{index:03d}"
+        quality_status = (
+            "adequate"
+            if len(papers) >= self.recommended_for_review
+            else "marginal"
+            if len(papers) >= self.minimum_for_synthesis
+            else "insufficient"
+        )
+        quality = {
+            "status": quality_status,
+            "candidate_count": len(candidates),
+            "eligible_count": len(relevant),
+            "relevant_count": len(papers),
+            "truncated_count": max(0, len(relevant) - len(papers)),
+            "minimum_for_synthesis": self.minimum_for_synthesis,
+            "recommended_for_review": self.recommended_for_review,
+            "traceable_count": sum(p.verification_status == "traceable_identifier" for p in papers),
+            "provider_success_count": sum(status.startswith("ok") for status in provider_status.values()),
+        }
+        return LiteratureBundle(
+            query=query,
+            queries=planned_queries,
+            papers=papers,
+            provider_status=provider_status,
+            excluded_count=max(0, len(candidates) - len(relevant)),
+            quality=quality,
+        )
 
-    async def _safe_fetch(self, status: dict[str, str], name: str, fn, client: httpx.AsyncClient, query: str, limit: int) -> list[PaperRecord]:
-        try:
-            records = await fn(client, query, limit)
-            status[name] = f"ok ({len(records)} records)"
-            return records
-        except Exception as exc:
-            status[name] = f"error: {exc.__class__.__name__}"
-            return []
+    async def _safe_fetch(self, name: str, fn, client: httpx.AsyncClient, query: str, limit: int):
+        last_error = ""
+        for attempt in range(2):
+            try:
+                return name, query, await fn(client, query, limit), ""
+            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+                last_error = exc.__class__.__name__
+                if attempt == 0:
+                    await asyncio.sleep(0.35)
+            except Exception as exc:
+                return name, query, [], exc.__class__.__name__
+        return name, query, [], last_error
 
     async def _search_openalex(self, client: httpx.AsyncClient, query: str, limit: int) -> list[PaperRecord]:
         response = await client.get(
@@ -187,6 +309,7 @@ class ScholarSearchService:
             params={
                 "search": query,
                 "per-page": limit,
+                "sort": "relevance_score:desc",
                 "mailto": "research-agent@example.com",
             },
         )
@@ -199,9 +322,15 @@ class ScholarSearchService:
                 for author in item.get("authorships", [])
                 if author.get("author", {}).get("display_name")
             ]
+            primary_location = item.get("primary_location") if isinstance(item.get("primary_location"), dict) else {}
+            pdf_url = _first_public_pdf_url(
+                item.get("best_oa_location"),
+                primary_location,
+                *(item.get("locations") or []) if isinstance(item.get("locations"), list) else (),
+            )
             url = (
-                item.get("primary_location", {}).get("landing_page_url")
-                or item.get("primary_location", {}).get("pdf_url")
+                primary_location.get("landing_page_url")
+                or pdf_url
                 or item.get("doi")
                 or item.get("id", "")
             )
@@ -219,6 +348,7 @@ class ScholarSearchService:
                     citation_count=item.get("cited_by_count"),
                     sources=["OpenAlex"],
                     identifiers={key: value for key, value in identifiers.items() if value},
+                    pdf_url=pdf_url,
                 )
             )
         return records
@@ -229,7 +359,7 @@ class ScholarSearchService:
             params={
                 "query": query,
                 "limit": limit,
-                "fields": "title,abstract,year,authors,url,venue,citationCount,externalIds",
+                "fields": "title,abstract,year,authors,url,venue,citationCount,externalIds,openAccessPdf",
             },
         )
         response.raise_for_status()
@@ -238,6 +368,7 @@ class ScholarSearchService:
         for item in data:
             authors = [author.get("name", "") for author in item.get("authors", []) if author.get("name")]
             identifiers = item.get("externalIds") or {}
+            open_access = item.get("openAccessPdf") if isinstance(item.get("openAccessPdf"), dict) else {}
             records.append(
                 PaperRecord(
                     title=str(item.get("title", "")).strip(),
@@ -249,6 +380,7 @@ class ScholarSearchService:
                     citation_count=item.get("citationCount"),
                     sources=["Semantic Scholar"],
                     identifiers={str(key): str(value) for key, value in identifiers.items() if value},
+                    pdf_url=str(open_access.get("url", "") or ""),
                 )
             )
         return records
@@ -276,6 +408,13 @@ class ScholarSearchService:
             identifiers = {}
             if url:
                 identifiers["arxiv"] = url.rstrip("/").split("/")[-1]
+            pdf_url = ""
+            for link in entry.findall("atom:link", ns):
+                if link.attrib.get("type") == "application/pdf" or link.attrib.get("title", "").casefold() == "pdf":
+                    pdf_url = link.attrib.get("href", "")
+                    break
+            if not pdf_url and identifiers.get("arxiv"):
+                pdf_url = f"https://arxiv.org/pdf/{identifiers['arxiv']}.pdf"
             records.append(
                 PaperRecord(
                     title=title,
@@ -287,6 +426,7 @@ class ScholarSearchService:
                     citation_count=None,
                     sources=["arXiv"],
                     identifiers=identifiers,
+                    pdf_url=pdf_url,
                 )
             )
         return records
@@ -339,6 +479,7 @@ class ScholarSearchService:
                 item.get("stats", {}).get("citations"),
             )
             identifiers = self._normalize_identifiers(item)
+            pdf_url = _first_public_pdf_url(item, item.get("links"))
             records.append(
                 PaperRecord(
                     title=title,
@@ -350,6 +491,7 @@ class ScholarSearchService:
                     citation_count=citation_count,
                     sources=["Web of Science"],
                     identifiers=identifiers,
+                    pdf_url=pdf_url,
                 )
             )
         return records
@@ -389,6 +531,7 @@ class ScholarSearchService:
             citation_count = self._first_int(item.get("citationCount"), item.get("citations"))
             abstract = str(item.get("abstract", "") or item.get("summary", "") or "").strip()
             identifiers = self._normalize_identifiers(item)
+            pdf_url = _first_public_pdf_url(item, item.get("links"))
             records.append(
                 PaperRecord(
                     title=title,
@@ -400,6 +543,7 @@ class ScholarSearchService:
                     citation_count=citation_count,
                     sources=["CNKI"],
                     identifiers=identifiers,
+                    pdf_url=pdf_url,
                 )
             )
         return records
@@ -508,6 +652,113 @@ def _decode_openalex_abstract(inverted_index: dict[str, list[int]]) -> str:
         for slot in slots:
             positions[slot] = token
     return " ".join(token for _, token in sorted(positions.items())).strip()
+
+
+def _first_public_pdf_url(*locations: object) -> str:
+    for location in locations:
+        if not isinstance(location, dict):
+            continue
+        candidates = [
+            location.get("pdf_url"),
+            location.get("pdfUrl"),
+            location.get("fullTextUrl"),
+            location.get("download_url"),
+            location.get("downloadUrl"),
+        ]
+        links = location.get("links")
+        if isinstance(links, dict):
+            candidates.extend(
+                [links.get("pdf"), links.get("fullText"), links.get("download")]
+            )
+        for candidate in candidates:
+            if isinstance(candidate, str) and _looks_like_pdf_url(candidate):
+                return candidate.strip()
+    return ""
+
+
+def _looks_like_pdf_url(value: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(value.strip())
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    path = parsed.path.casefold()
+    query = parsed.query.casefold()
+    return path.endswith(".pdf") or "/pdf/" in path or "format=pdf" in query or "type=pdf" in query
+
+
+def _deduplicate_queries(queries: list[str]) -> list[str]:
+    results: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        cleaned = " ".join(query.split()).strip(" ,，。;；")
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            results.append(cleaned)
+            seen.add(key)
+    return results
+
+
+def _paper_aliases(record: PaperRecord) -> list[str]:
+    aliases: list[str] = []
+    normalized_identifiers = {
+        str(key).casefold(): str(value).strip().casefold()
+        for key, value in record.identifiers.items()
+        if value
+    }
+    doi = normalized_identifiers.get("doi", "")
+    doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi)
+    if doi:
+        aliases.append(f"doi:{doi}")
+    arxiv = normalized_identifiers.get("arxiv", "")
+    arxiv = re.sub(r"^https?://arxiv\.org/(?:abs|pdf)/", "", arxiv).removesuffix(".pdf")
+    if arxiv:
+        aliases.append(f"arxiv:{arxiv}")
+    normalized_title = " ".join(record.title.lower().split())[:220]
+    if normalized_title:
+        aliases.append(f"title:{normalized_title}")
+    return _deduplicate_queries(aliases)
+
+
+def _paper_relevance(record: PaperRecord, queries: list[str]) -> float:
+    text = f"{record.title} {record.abstract} {record.venue}".casefold()
+    title = record.title.casefold()
+    query_scores: list[float] = []
+    for query in queries:
+        terms = _query_terms(query)
+        if not terms:
+            continue
+        matched = sum(term in text for term in terms)
+        title_matched = sum(term in title for term in terms)
+        phrase_match = query.casefold() in text
+        if len(terms) > 1 and matched < 2 and not phrase_match:
+            query_scores.append(0.0)
+            continue
+        phrase_bonus = 0.35 if phrase_match else 0.0
+        query_scores.append(min(1.0, matched / len(terms) + title_matched / len(terms) * 0.35 + phrase_bonus))
+    if not query_scores:
+        return 0.0
+    multi_query_bonus = min(0.12, max(0, len(record.matched_queries) - 1) * 0.03)
+    metadata_bonus = 0.04 if record.identifiers or record.url else 0.0
+    return round(min(1.0, max(query_scores) + multi_query_bonus + metadata_bonus), 3)
+
+
+def _query_terms(query: str) -> list[str]:
+    stopwords = {
+        "a", "an", "and", "article", "current", "for", "in", "of", "on", "or", "review",
+        "survey", "the", "to", "write", "一个", "与", "写", "写一份", "当前", "相关", "的", "综述",
+        "研究", "进展", "论文", "文献", "请", "帮我",
+    }
+    english = re.findall(r"[a-z][a-z0-9-]{2,}", query.casefold())
+    chinese_chunks = re.findall(r"[\u4e00-\u9fff]{2,}", query)
+    chinese: list[str] = []
+    for chunk in chinese_chunks:
+        cleaned = chunk
+        for token in sorted((word for word in stopwords if any("\u4e00" <= char <= "\u9fff" for char in word)), key=len, reverse=True):
+            cleaned = cleaned.replace(token, " ")
+        chinese.extend(part for part in cleaned.split() if len(part) >= 2)
+    return _deduplicate_queries([term for term in [*english, *chinese] if term not in stopwords])
 
 
 def _xml_text(element: ET.Element | None) -> str:

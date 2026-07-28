@@ -11,12 +11,13 @@
 1. Deploy the FastAPI app behind HTTPS.
 2. Put it behind a reverse proxy such as Nginx or a cloud load balancer.
 3. Set `OPENAI_BASE_URL` to `https://YOUR_DOMAIN/v1`.
-4. Use a normal OpenAI API key header for auth.
+4. Set `PUBLIC_API_KEY` on this service and use the same value as a normal OpenAI API key with a `Bearer` header.
 5. Set `UPSTREAM_MODEL` explicitly when your upstream relay exposes multiple models. Recommended default: `gpt-5.4-mini`.
 6. Set upstream runtime variables in `.env`:
    - `UPSTREAM_BASE_URL=https://token4research.cn/v1`
    - `UPSTREAM_API_KEY=...`
    - `UPSTREAM_MODEL=gpt-5.4-mini`
+   - `PUBLIC_API_KEY=...`
    - `IMAGE_MODEL=gpt-image-2`
 
 ## Client test

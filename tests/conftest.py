@@ -15,6 +15,7 @@ if str(PROJECT_SRC) not in sys.path:
 from research_agent_platform import agent as agent_module
 from research_agent_platform.config import config
 from research_agent_platform.agent import ResearchAgentService
+from research_agent_platform.connectors.scholar import LiteratureBundle, PaperRecord
 from research_agent_platform.upstream import GeneratedImage
 
 
@@ -22,12 +23,11 @@ from research_agent_platform.upstream import GeneratedImage
 def isolated_env(tmp_path, monkeypatch):
     state_root = tmp_path / ".agent-state"
     artifact_root = tmp_path / "agent-workspace"
-    wiki_root = tmp_path / "research-wiki"
     aris_root = tmp_path / "aris"
     prd_path = tmp_path / "research-agent-prd.md"
     tech_spec_path = tmp_path / "research-agent-tech-spec.md"
 
-    for path in (state_root, artifact_root, wiki_root, aris_root):
+    for path in (state_root, artifact_root, aris_root):
         path.mkdir(parents=True, exist_ok=True)
 
     prd_path.write_text("# PRD\n\nTest PRD.", encoding="utf-8")
@@ -35,7 +35,6 @@ def isolated_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config, "state_root", str(state_root))
     monkeypatch.setattr(config, "artifact_root", str(artifact_root))
-    monkeypatch.setattr(config, "wiki_root", str(wiki_root))
     monkeypatch.setattr(config, "aris_repo_root", str(aris_root))
     monkeypatch.setattr(config, "prd_path", str(prd_path))
     monkeypatch.setattr(config, "tech_spec_path", str(tech_spec_path))
@@ -43,6 +42,16 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "upstream_base_url", "https://example.invalid/v1")
     monkeypatch.setattr(config, "upstream_model", "gpt-5.4-mini")
     monkeypatch.setattr(config, "image_model", "gpt-image-2")
+    monkeypatch.setattr(config, "cloud_sync_enabled", False)
+    monkeypatch.setattr(config, "cloud_delivery_required", False)
+    monkeypatch.setattr(config, "seafile_base_url", "")
+    monkeypatch.setattr(config, "seafile_api_token", "")
+    monkeypatch.setattr(config, "seafile_username", "")
+    monkeypatch.setattr(config, "seafile_password", "")
+    monkeypatch.setattr(config, "seafile_repo_id", "")
+    monkeypatch.setattr(config, "seafile_repo_name", "Research Agent")
+    monkeypatch.setattr(config, "seafile_remote_root", "research-agent")
+    monkeypatch.setattr(config, "seafile_share_links", True)
 
     async def fake_generate_text(*, system_prompt, user_prompt, model=None, temperature=0.3):
         prompt = f"{system_prompt}\n{user_prompt}"
@@ -118,10 +127,56 @@ def isolated_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(agent_module, "generate_image", fake_generate_image)
 
+    async def fake_search_bundle(
+        _service,
+        query,
+        *,
+        queries=None,
+        per_source_limit=8,
+        max_papers=24,
+    ):
+        papers = [
+            PaperRecord(
+                title=f"{query} evidence paper {index}",
+                year=2018 + index,
+                abstract=f"Evidence about {query}, method {index}, and reported limitations.",
+                authors=[f"Author {index}"],
+                url=f"https://doi.org/10.1000/review-{index}",
+                venue="Test Journal",
+                citation_count=10 * index,
+                sources=["OpenAlex"],
+                identifiers={"doi": f"10.1000/review-{index}"},
+                paper_id=f"P{index:03d}",
+                relevance_score=0.9,
+                matched_queries=list(queries or [query]),
+                verification_status="traceable_identifier",
+            )
+            for index in range(1, 11)
+        ]
+        return LiteratureBundle(
+            query=query,
+            queries=list(queries or [query]),
+            papers=papers[:max_papers],
+            provider_status={"openalex": "ok (10 records)", "semantic_scholar": "disabled in tests"},
+            quality={
+                "status": "adequate",
+                "candidate_count": 10,
+                "relevant_count": 10,
+                "minimum_for_synthesis": 10,
+                "recommended_for_review": 15,
+                "traceable_count": 10,
+                "provider_success_count": 1,
+            },
+        )
+
+    monkeypatch.setattr(
+        "research_agent_platform.connectors.scholar.ScholarSearchService.search_bundle",
+        fake_search_bundle,
+    )
+
     return {
         "state_root": state_root,
         "artifact_root": artifact_root,
-        "wiki_root": wiki_root,
         "aris_root": aris_root,
         "prd_path": prd_path,
         "tech_spec_path": tech_spec_path,

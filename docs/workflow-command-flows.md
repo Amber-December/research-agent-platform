@@ -22,26 +22,32 @@ flowchart TD
     J --> M["Finalize, write Wiki record, sync workspace"]
 ```
 
-The local UI uses `user_id=local`. Cloud sync mirrors the same boundary to `SEAFILE_REMOTE_ROOT/local/<session_id>/` and exposes folder preview/download links through `cloud_workspace` in API responses.
+The local UI uses `user_id=local`. Cloud sync mirrors the same boundary to `SEAFILE_REMOTE_ROOT/local/<session_id>/` and exposes folder preview/download links through `cloud_workspace` in API responses. It is a one-way incremental mirror from the local session workspace to Seafile; remote edits are not pulled back automatically.
+
+Every routed workflow returns a task immediately. The UI subscribes to `GET /api/tasks/{task_id}/events` and receives an operational progress trace. This trace reports stages, evidence counts, generated artifacts, checkpoints, failures, and cloud uploads; it never exposes hidden model chain-of-thought.
+
+Checkpoint policy is conservative. A workflow normally selects its recommended default and continues. It pauses only when the user explicitly asks it to wait for approval, or when a generated `Decision Required` section marks a material decision as blocking, explains why evidence cannot resolve it, provides at least two named mutually exclusive options, and states a recommended default. Approving accepts that default; sending feedback selects another option or requests revision.
 
 ## `/review`: literature evidence
 
 ```mermaid
 flowchart TD
-    A["/review + research question"] --> B["Scholar multi-provider retrieval"]
-    B --> B1["bib/LITERATURE_SEARCH.md and JSON"]
-    B1 --> C["Research Brief"]
-    C --> C1["bib/RESEARCH_BRIEF.md"]
-    C1 --> D["Literature Synthesis"]
-    D --> D1["bib/LITERATURE_REVIEW.md"]
-    D1 --> E["Evidence Map"]
-    E --> E1["bib/EVIDENCE_MAP.md"]
-    E1 --> F["Research Gaps"]
-    F --> F1["bib/RESEARCH_GAPS.md"]
-    F1 --> G["Handoff evidence to /idea and /plan"]
+    A["/review + research question"] --> B["Research Brief and 4-6 query protocol"]
+    B --> B1["bib/RESEARCH_BRIEF.md"]
+    B1 --> C["Relevant local uploads + multi-query providers"]
+    C --> D["Relevance filter + DOI/arXiv/title dedup + stable IDs"]
+    D --> D1["LITERATURE_SEARCH + RETRIEVAL_QUALITY"]
+    D1 --> D2["Check explicit public PDF URLs; download validated files to bib/papers/"]
+    D2 --> E{"At least 10 traceable sources?"}
+    E -->|No| F["Stop formal synthesis and report remediation"]
+    E -->|Yes| G["Technical-axis Literature Synthesis"]
+    G --> H["Evidence Map with source IDs and confidence"]
+    H --> I["Research Gaps with evidence-to-gap chain"]
+    I --> J["Citation audit + coverage report"]
+    J --> K["Handoff evidence to /idea and /plan"]
 ```
 
-`/review` means literature review. It searches OpenAlex, Semantic Scholar, and arXiv by default; Web of Science and CNKI are enabled by configuration. It does not process peer-review comments.
+`/review` means literature review. It searches OpenAlex, Semantic Scholar, and arXiv by default; Web of Science and CNKI are enabled by configuration. User-uploaded PDF, Word, bibliography, Markdown, TeX, and text sources are admitted only when extractable and topic-relevant. Formal review claims cite stable `[Pxxx]` IDs or exact local paths, distinguish abstract/metadata evidence from full text, and separate foundational/recent work and formal publications/preprints. Provider failures remain retrieval limitations. `/review` does not process peer-review comments.
 
 ## `/idea`: candidate selection
 

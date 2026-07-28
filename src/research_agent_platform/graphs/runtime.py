@@ -78,10 +78,10 @@ class LangGraphWorkflowRuntime:
         if task.status == "completed":
             wiki_note = self._latest_wiki_note(task)
             text = (
-                f"{workflow.title} 已完成。产物保存在 `{task.artifact_root}`，"
-                f"并已写入本地研究 wiki 记录 `{wiki_note}`。"
+                f"{workflow.title} 已完成。产物已写入本会话工作区并完成交付。"
+                f"任务记录位于 `{self._session_relative_path(task, wiki_note)}`。"
                 if wiki_note
-                else f"{workflow.title} 已完成。产物保存在 `{task.artifact_root}`。"
+                else f"{workflow.title} 已完成。产物已写入本会话工作区并完成交付。"
             )
         elif task.status == "failed":
             text = task.error or f"{workflow.title} 执行失败。"
@@ -250,18 +250,17 @@ class LangGraphWorkflowRuntime:
                 task.artifacts.extend(await self.service._write_delivery_artifacts(task))
             if task.command == "/rebuttal":
                 task.artifacts.extend(self.service._write_rebuttal_delivery_artifacts(task))
+            if task.command == "/review":
+                task.artifacts.extend(self.service._write_review_delivery_artifacts(task))
             if task.command == "/present":
                 await self.service._write_presentation_delivery_artifacts(task)
 
-            wiki_note = self.service.wiki.record_task(task)
-            task.notes.append(f"Wiki note: {wiki_note}")
-            if workflow.stage_definitions:
-                task.current_stage_name = workflow.stage_definitions[-1].name
-            task.status = "completed"
-            task.summary = f"{workflow.title} completed with {len(task.artifacts)} artifacts."
-            self.service._log_progress(task, f"工作流完成: {workflow.title}")
+            self.service._finalize_task_record(task, workflow)
             self.service.store.save_task(task)
-            await self.service.sync_task_workspace(task)
+            cloud_workspace = await self.service.sync_task_workspace(task)
+            self.service.enforce_cloud_delivery(task, cloud_workspace)
+            if task.status != "failed":
+                self.service._mark_task_completed(task, workflow)
 
             session = self.service.store.load_session(task.session_id)
             if session:
@@ -293,6 +292,12 @@ class LangGraphWorkflowRuntime:
             if note.startswith("Wiki note: "):
                 return note.replace("Wiki note: ", "", 1)
         return ""
+
+    def _session_relative_path(self, task: TaskRun, path: str) -> str:
+        try:
+            return Path(path).resolve().relative_to(Path(task.artifact_root).resolve()).as_posix()
+        except ValueError:
+            return path
 
     def _approval_waiting_summary(
         self,

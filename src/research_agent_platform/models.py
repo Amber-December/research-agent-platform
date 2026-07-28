@@ -9,9 +9,10 @@ from pydantic import BaseModel, Field
 
 TaskStatus = Literal["running", "waiting_human", "completed", "failed"]
 CheckpointStatus = Literal["pending", "approved", "rejected"]
-RouteSource = Literal["explicit", "implicit_heuristic", "implicit_llm", "approval"]
+RouteSource = Literal["explicit", "implicit_heuristic", "implicit_llm", "approval", "chat"]
 PresentationType = Literal["paper", "stage"]
 PresentationSourceScope = Literal["auto", "attachments", "selected", "session", "workspace"]
+DownloadSourceScope = Literal["auto", "attachments", "selected", "session", "workspace"]
 CloudSyncStatus = Literal["disabled", "pending", "synced", "error"]
 ArtifactKind = Literal[
     "report",
@@ -85,9 +86,21 @@ class WriteSourceConfig(BaseModel):
     selection_reason: str = ""
 
 
+class DownloadSourceConfig(BaseModel):
+    requested_scope: DownloadSourceScope = "auto"
+    resolved_scope: DownloadSourceScope
+    source_refs: list[str] = Field(default_factory=list)
+    query_terms: list[str] = Field(default_factory=list)
+    upload_batch_id: str = ""
+    selection_reason: str = ""
+
+
 class CloudWorkspaceState(BaseModel):
     provider: str = "seafile"
     status: CloudSyncStatus = "disabled"
+    configured: bool = False
+    configuration_hint: str = ""
+    auth_mode: str = ""
     remote_path: str = ""
     share_url: str = ""
     preview_url: str = ""
@@ -97,6 +110,27 @@ class CloudWorkspaceState(BaseModel):
     uploaded_files: int = 0
     last_synced_at: str = ""
     error: str = ""
+
+
+class CloudAuthProfile(BaseModel):
+    user_id: str
+    provider: str = "seafile"
+    base_url: str = ""
+    api_token: str = ""
+    repo_id: str = ""
+    repo_name: str = "Research Agent"
+    remote_root: str = "research-agent"
+    share_links: bool = True
+    created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+
+
+class ProgressEvent(BaseModel):
+    sequence: int
+    kind: str = "progress"
+    message: str
+    stage: str = ""
+    timestamp: str = Field(default_factory=utc_now)
 
 
 class ApprovalCheckpoint(BaseModel):
@@ -124,16 +158,19 @@ class TaskRun(BaseModel):
     current_stage_name: str = ""
     artifact_root: str = ""
     summary: str = ""
+    response_text: str = ""
     error: str = ""
     created_at: str = Field(default_factory=utc_now)
     updated_at: str = Field(default_factory=utc_now)
     approvals: list[ApprovalCheckpoint] = Field(default_factory=list)
     artifacts: list[ArtifactRecord] = Field(default_factory=list)
     progress_log: list[str] = Field(default_factory=list)
+    progress_events: list[ProgressEvent] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     presentation_source: PresentationSourceConfig | None = None
     rebuttal_source: RebuttalSourceConfig | None = None
     write_source: WriteSourceConfig | None = None
+    download_source: DownloadSourceConfig | None = None
 
 
 class ChatSession(BaseModel):

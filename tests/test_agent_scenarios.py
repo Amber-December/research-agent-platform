@@ -41,6 +41,11 @@ def test_present_runs_without_routine_checkpoint(service: ResearchAgentService, 
     assert Path(task.artifact_root, "figures").is_dir()
     assert Path(task.artifact_root, "paper").is_dir()
     assert Path(task.artifact_root, "Content").is_dir()
+    wiki_note = Path(task.artifact_root, "wiki", "agent-notes", f"{task.task_id}.md")
+    assert wiki_note.exists()
+    assert "Status: completed" in wiki_note.read_text(encoding="utf-8")
+    assert any(artifact.relative_path == f"wiki/agent-notes/{task.task_id}.md" for artifact in task.artifacts)
+    assert all(Path(note.removeprefix("Wiki note: ")).is_relative_to(Path(task.artifact_root)) for note in task.notes if note.startswith("Wiki note: "))
     assert len(task.approvals) == 0
     assert task.current_stage_name == "qa_brief"
     assert any(artifact.relative_path == "presentation/SLIDES_OUTLINE.md" for artifact in task.artifacts)
@@ -55,6 +60,31 @@ def test_present_runs_without_routine_checkpoint(service: ResearchAgentService, 
     assert json.loads(notes_json.read_text(encoding="utf-8"))[0]["notes"]
     deck = Presentation(Path(task.artifact_root, "presentation", "STAGE_REPORT.pptx"))
     assert all(slide.notes_slide.notes_text_frame.text.strip() for slide in deck.slides)
+
+
+def test_stage_prompt_enforces_session_workspace_boundary(
+    service: ResearchAgentService, monkeypatch
+):
+    system_prompts: list[str] = []
+
+    async def capture_prompt(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        system_prompts.append(system_prompt)
+        return "# Research artifact\n\n- Session-scoped output."
+
+    monkeypatch.setattr(agent_module, "generate_text", capture_prompt)
+    session = service.store.create_session()
+    result = run(service.chat(session.session_id, "/review 海绵城市"))
+    completed = service.get_task(result["task_id"])
+
+    assert completed is not None
+    expected_root = str(Path(completed.artifact_root).resolve())
+    assert system_prompts
+    assert all(expected_root in prompt for prompt in system_prompts)
+    assert all("Never write or propose writing research files" in prompt for prompt in system_prompts)
+    assert all("wiki/ for session memory and task notes" in prompt for prompt in system_prompts)
+    note_path = Path(completed.artifact_root, "wiki", "agent-notes", f"{completed.task_id}.md")
+    assert note_path.exists()
+    assert not Path(service.artifacts.root).parent.joinpath("research-wiki", "agent-notes", f"{completed.task_id}.md").exists()
 
 
 def test_paper_talk_uses_paper_delivery_name(service: ResearchAgentService):
@@ -102,7 +132,7 @@ def test_present_source_set_is_frozen_at_task_start(service: ResearchAgentServic
     assert "paper/LATE.md" not in selection
 
 
-def test_present_only_checkpoints_for_explicit_multiple_choices(service: ResearchAgentService, monkeypatch):
+def test_present_only_checkpoints_for_complete_blocking_decision(service: ResearchAgentService, monkeypatch):
     original_generate_text = agent_module.generate_text
 
     async def generate_with_choices(*, system_prompt, user_prompt, model=None, temperature=0.3):
@@ -113,7 +143,15 @@ def test_present_only_checkpoints_for_explicit_multiple_choices(service: Researc
             temperature=temperature,
         )
         if "Current stage: Slides Outline" in user_prompt:
-            return content + "\n\n## Decision Required\n- Option A: concise talk\n- Option B: detailed talk\n"
+            return content + (
+                "\n\n## Decision Required\n"
+                "Blocking: Yes\n"
+                "Question: Choose the disclosure scope.\n"
+                "Why user input is necessary: This changes which unpublished result is disclosed externally.\n"
+                "Option A: Include the unpublished result.\n"
+                "Option B: Exclude the unpublished result.\n"
+                "Recommended Default: Option B.\n"
+            )
         return content
 
     monkeypatch.setattr(agent_module, "generate_text", generate_with_choices)
@@ -135,6 +173,27 @@ def test_present_only_checkpoints_for_explicit_multiple_choices(service: Researc
     assert any("打回" in item for item in task.progress_log)
 
 
+def test_present_does_not_checkpoint_for_unstructured_preferences(service: ResearchAgentService, monkeypatch):
+    original_generate_text = agent_module.generate_text
+
+    async def generate_with_preferences(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        content = await original_generate_text(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            temperature=temperature,
+        )
+        if "Current stage: Slides Outline" in user_prompt:
+            return content + "\n\n## Decision Required\n- Option A: concise talk\n- Option B: detailed talk\n"
+        return content
+
+    monkeypatch.setattr(agent_module, "generate_text", generate_with_preferences)
+    start = run(service.chat(None, "/present 做一个中文汇报"))
+
+    assert start["status"] == "completed"
+    assert start["checkpoint"] is None
+
+
 def test_present_does_not_checkpoint_for_markdown_none_decision(service: ResearchAgentService, monkeypatch):
     original_generate_text = agent_module.generate_text
 
@@ -154,6 +213,13 @@ def test_present_does_not_checkpoint_for_markdown_none_decision(service: Researc
 
     assert start["status"] == "completed"
     assert start["checkpoint"] is None
+
+
+def test_present_respects_explicit_request_to_wait_for_approval(service: ResearchAgentService):
+    start = run(service.chat(None, "/present 先让我审核，批准后再继续生成"))
+
+    assert start["status"] == "waiting_human"
+    assert start["checkpoint"]["title"] == "Presentation Outline Approval"
 
 
 def test_resume_after_restart(service: ResearchAgentService, isolated_env):
@@ -209,3 +275,55 @@ def test_resume_after_interruption_during_presentation_delivery(service, monkeyp
         assert Path(completed.artifact_root, "presentation", "STAGE_REPORT.pptx").exists()
 
     asyncio.run(scenario())
+
+
+def test_idea_verification_runs_without_routine_checkpoint(service: ResearchAgentService, monkeypatch):
+    original_generate_text = agent_module.generate_text
+
+    async def generate_idea(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        content = await original_generate_text(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            temperature=temperature,
+        )
+        if "Current stage: Idea Candidates" in user_prompt:
+            return (
+                "# Idea Candidates\n\n"
+                "## Problem Frame\n- Topic.\n\n"
+                "## Candidate Ideas\n- A\n- B\n- C\n\n"
+                "## Comparative Assessment\n- A best.\n\n"
+                "## Recommended Candidate\n- A\n\n"
+                "## Risks and Unknowns\n- None.\n\n"
+                "## Decision Required\nNone."
+            )
+        if "Current stage: Idea Verification" in user_prompt:
+            return (
+                "# Idea Verification\n\n"
+                "## Candidate Under Review\n- A\n\n"
+                "## Closest Prior Work\n- Prior.\n\n"
+                "## Novelty Stress Test\n- Pass.\n\n"
+                "## Feasibility Stress Test\n- Pass.\n\n"
+                "## Disconfirming Evidence\n- None.\n\n"
+                "## Unresolved Questions\n- None.\n\n"
+                "## Verification Verdict\n- Keep."
+            )
+        if "Current stage: Final Idea" in user_prompt:
+            return (
+                "# Final Idea\n\n"
+                "## Problem Anchor\n- Topic.\n\n"
+                "## Method Thesis\n- A.\n\n"
+                "## Dominant Contribution\n- B.\n\n"
+                "## Falsifiable Prediction\n- C.\n\n"
+                "## Evidence Basis\n- D.\n\n"
+                "## Scope Boundary\n- E.\n\n"
+                "## Open Risks\n- F.\n\n"
+                "## Handoff to Plan\n- Ready."
+            )
+        return content
+
+    monkeypatch.setattr(agent_module, "generate_text", generate_idea)
+    start = run(service.chat(None, "/idea 给我一个创新方向"))
+
+    assert start["status"] == "completed"
+    assert start["checkpoint"] is None
