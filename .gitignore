@@ -10,7 +10,9 @@ wheels/
 /.venv
 
 # Local secrets
+/.env
 # Runtime state and generated workspaces
+agent-workspace/
 /.agent-state/
 /research-wiki/
 /test-runs/

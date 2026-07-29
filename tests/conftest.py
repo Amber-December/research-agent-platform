@@ -41,6 +41,7 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "upstream_api_key", "test-key")
     monkeypatch.setattr(config, "upstream_base_url", "https://example.invalid/v1")
     monkeypatch.setattr(config, "upstream_model", "gpt-5.4-mini")
+    monkeypatch.setattr(config, "public_api_key", "")
     monkeypatch.setattr(config, "image_model", "gpt-image-2")
     monkeypatch.setattr(config, "cloud_sync_enabled", False)
     monkeypatch.setattr(config, "cloud_delivery_required", False)
