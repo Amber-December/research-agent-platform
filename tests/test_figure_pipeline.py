@@ -70,10 +70,7 @@ def test_figure_workflow_uses_code_for_valid_uploaded_data(service, monkeypatch)
     session = service.store.create_session()
     source = Path(session.workspace_root, "Content", "uploads", "results.csv")
     source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_text("method,score
-A,0.7
-B,0.9
-", encoding="utf-8")
+    source.write_text("method,score\nA,0.7\nB,0.9\n", encoding="utf-8")
     session.upload_batches.append(
         UploadBatchRecord(relative_paths=["Content/uploads/results.csv"])
     )

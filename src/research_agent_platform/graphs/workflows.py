@@ -25,7 +25,7 @@ class WorkflowDefinition:
 
 
 def _skills(*names: str) -> list[str]:
-    return [f"skills/skills-codex/{name}/SKILL.md" for name in names]
+    return [f"skills/{name}/SKILL.md" for name in names]
 
 
 def workflow_registry() -> dict[str, WorkflowDefinition]:
@@ -989,7 +989,6 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "paper-poster",
                         "paper-poster-html",
                         "slides-polish",
-                        "scientific-slides",
                     ),
                     hitl=True,
                     checkpoint_title="Presentation Outline Approval",
@@ -1024,7 +1023,6 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "slides-polish",
                         "result-to-claim",
                         "paper-claim-audit",
-                        "scientific-slides",
                     ),
                 ),
                 StageDefinition(

@@ -9,6 +9,9 @@ from uuid import uuid4
 from ..models import ChatSession, CloudAuthProfile, TaskRun, utc_now
 
 
+LOCAL_WORKSPACE_USER = "local"
+
+
 class StateStore:
     def __init__(self, root: str, artifact_root: str | None = None) -> None:
         self.root = Path(root)
@@ -32,7 +35,7 @@ class StateStore:
     def create_session(self, user_id: str = "local") -> ChatSession:
         session = ChatSession(user_id=user_id or "local")
         session.workspace_root = str(
-            self.artifact_root / self._slug(session.user_id) / session.session_id
+            self.artifact_root / LOCAL_WORKSPACE_USER / session.session_id
         )
         self.save_session(session)
         return session
@@ -45,7 +48,7 @@ class StateStore:
             if user_id and session.user_id in {"default", "local"} and user_id != session.user_id:
                 session.user_id = user_id
             session.workspace_root = str(
-                self.artifact_root / self._slug(session.user_id) / session.session_id
+                self.artifact_root / LOCAL_WORKSPACE_USER / session.session_id
             )
             self.save_session(session)
             return session

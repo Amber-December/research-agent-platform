@@ -42,6 +42,8 @@ def test_openai_compatible_chat_completion_routes_to_task(service, monkeypatch):
     task = service.get_task(payload["x_agent_task"]["task_id"])
     assert task is not None
     assert task.user_id == "qingxiaoda-user"
+    assert f"agent-workspace/local/{task.session_id}" in task.artifact_root.replace("\\", "/")
+    assert "agent-workspace/qingxiaoda-user/" not in task.artifact_root.replace("\\", "/")
 
 
 def test_openai_compatible_chat_completion_streams_done_marker(service, monkeypatch):

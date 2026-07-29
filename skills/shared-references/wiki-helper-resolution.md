@@ -92,8 +92,8 @@ all miss.
   path — `~/.aris/repo` already covers the global-install gap with a
   single per-user file, no OS branching needed.
 - ❌ Adding `~/.codex/skills/research-wiki/research_wiki.py` — that's
-  Codex-side global install, lives in the **Codex** mirror's chain
-  (`skills/skills-codex/...`), not the CC chain.
+  Codex-side global install; this repository keeps the project-local
+  canonical copy at `skills/research-wiki/`.
 
 `~/.aris/repo` (layer 4, #366) is the one exception to the earlier
 "no 4th layer" stance in this doc's history: it exists because the

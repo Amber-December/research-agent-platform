@@ -2467,7 +2467,7 @@ class ResearchAgentService:
             "and produce file-ready markdown artifacts. Separate assumptions from grounded facts, use human checkpoints only for genuine user decisions, "
             "and optimize for local collaboration with a human researcher. "
             f"The sole writable research workspace for this task is: {Path(task.artifact_root).resolve()}. "
-            "This path is exactly agent-workspace/<user_id>/<session_id>/. Every model-generated research artifact, task note, "
+            "This path is exactly agent-workspace/local/<session_id>/. Every model-generated research artifact, task note, "
             "context file, log, intermediate file, and final deliverable must remain inside this one session directory. "
             "Never write or propose writing research files to the project root, research-wiki/, .agent-state/, a task-specific "
             "folder, another user, or another session. The only allowed top-level directories inside the session are exactly "
@@ -2484,6 +2484,8 @@ class ResearchAgentService:
 
     async def _build_figure_render_prompt(self, task: TaskRun, inventory: str, briefs: str) -> str:
         session_context = self._session_context_for_task(task)
+        manuscript = self._artifact_text(task, "paper/PAPER_REVISED.md") or self._artifact_text(task, "paper/PAPER_DRAFT.md")
+        manuscript_block = f"Current paper excerpt:\n{manuscript[:4000]}\n\n" if manuscript else ""
         system_prompt = (
             "You convert research figure plans into a single production-ready gpt-image-2 prompt. "
             "Return plain prompt text only, no markdown, no bullets. "
@@ -2497,6 +2499,7 @@ class ResearchAgentService:
         user_prompt = (
             f"Objective:\n{task.objective}\n\n"
             f"{context_block}"
+            f"{manuscript_block}"
             f"Figure inventory:\n{inventory}\n\n"
             f"Figure briefs:\n{briefs[:6000]}\n\n"
             "Choose the single highest-value figure to render first. "
@@ -2843,15 +2846,7 @@ class ResearchAgentService:
         return None
 
     def _resolve_skill_path(self, aris_root: Path, relative_path: str) -> Path:
-        direct = aris_root / relative_path
-        if direct.exists():
-            return direct
-        normalized = relative_path.replace("/", "\\")
-        if "skills\\skills-codex\\" in normalized:
-            fallback = aris_root / normalized.replace("skills\\skills-codex\\", "skills\\")
-            if fallback.exists():
-                return fallback
-        return direct
+        return aris_root / relative_path
 
     def _skill_excerpt(self, path: Path, limit: int) -> str:
         text = path.read_text(encoding="utf-8", errors="ignore")

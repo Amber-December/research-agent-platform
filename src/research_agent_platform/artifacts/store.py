@@ -19,6 +19,8 @@ WORKSPACE_DIRS = (
     "logs",
 )
 
+LOCAL_WORKSPACE_USER = "local"
+
 
 class ArtifactStore:
     def __init__(self, root: str) -> None:
@@ -37,7 +39,7 @@ class ArtifactStore:
         return self.session_root(user_id=user_id, session_id=session_id)
 
     def session_root(self, *, user_id: str = "local", session_id: str) -> Path:
-        path = self.root / self._slug(user_id) / self._slug(session_id)
+        path = self.root / LOCAL_WORKSPACE_USER / self._slug(session_id)
         path.mkdir(parents=True, exist_ok=True)
         self.ensure_workspace(path)
         return path

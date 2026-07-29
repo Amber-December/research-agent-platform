@@ -229,7 +229,7 @@ The following skills are wired for manual review (Claude Code only):
 
 > `/research-lit` supports `oracle-pro` only; manual review is not wired because the skill has no reviewer call blocks.
 
-> **Platform note**: Manual review requires MCP tools (available only in Claude Code). Mirrored skill packs under `skills/skills-codex/` and `skills/skills-codex-*-review/` do NOT include manual-review wiring — they target Codex CLI and other platforms that lack MCP support. Oracle-pro support in those mirrors is unaffected.
+> **Platform note**: Manual review requires MCP tools (available only in Claude Code). This repository keeps one canonical skill tree under `skills/<skill-name>/`; older mirror packs have been removed.
 
 ### Nightmare mode (Codex-only)
 
@@ -246,7 +246,7 @@ The mainline reviewer contract is `mcp__codex__codex` + `mcp__codex__codex-reply
 If Codex MCP is broken in your setup, prefer in order:
 
 1. Fix the MCP registration: `claude mcp add codex -s user -- codex mcp-server`, then `/mcp` in-session to (re)connect.
-2. Codex-CLI-as-executor: use the native mirror pack [`skills/skills-codex/`](../skills-codex/) — designed to run inside Codex CLI without Claude-side MCP.
+2. Codex-CLI-as-executor: use the canonical local skill tree under `skills/<skill-name>/`; this repository no longer vendors separate Codex mirror packs.
 3. One-shot `codex exec` only for skills whose review is a single call with no follow-up reply.
 
 ### Future work

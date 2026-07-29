@@ -7,18 +7,15 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+/.venv
 
 # Local secrets
-.env
-
 # Runtime state and generated workspaces
-.agent-state/
-agent-workspace/
-research-wiki/
-test-runs/
-.playwright-cli/
-.pytest_cache/
+/.agent-state/
+/research-wiki/
+/test-runs/
+/.playwright-cli/
+/.pytest_cache/
 
 # Local editor and OS files
 .vscode/

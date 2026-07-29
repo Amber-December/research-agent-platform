@@ -31,8 +31,8 @@ uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-di
 - The page talks to the local research-agent workflow, not a plain echo proxy
 - Human checkpoints are exceptional: the agent continues automatically unless the user explicitly asks it to wait or a material, unresolved choice requires the user. Approving accepts its recommended default; feedback can select another option.
 - Research materials can be dragged onto the chat page or selected with the file picker. Uploads are stored under the current session workspace without starting a workflow.
-- Files are written under `agent-workspace/<user_id>/<session_id>/` and exposed at `/workspace-files/...`
-- Local UI sessions use `agent-workspace/local/<session_id>/`; deployed clients can pass `metadata.user_id` for per-user isolation.
+- Files are written under `agent-workspace/local/<session_id>/` and exposed at `/workspace-files/...`
+- Deployed clients can still pass `metadata.user_id` for identity metadata, but local artifact storage remains under `local/<session_id>/`.
 - Task notes are session artifacts under `wiki/agent-notes/`; no model-generated research file is written to a separate project-level wiki.
 - See `docs/workspace-layout.md` for the ARIS-style workspace layout
 
@@ -80,7 +80,7 @@ For `/write`, `--source attachments|selected|session|workspace` is optional. Aut
 
 ## Optional Seafile cloud workspace
 
-- Set `CLOUD_SYNC_ENABLED=true` to mirror `agent-workspace/<user_id>/<session_id>/` to `SEAFILE_REMOTE_ROOT/<user_id>/<session_id>/`.
+- Set `CLOUD_SYNC_ENABLED=true` to mirror `agent-workspace/local/<session_id>/` to `SEAFILE_REMOTE_ROOT/<user_id>/<session_id>/`.
 - Set `CLOUD_DELIVERY_REQUIRED=true` in local or deployed environments where a workflow must not report successful delivery until Seafile returns a share link.
 - For Tsinghua Seafile, run `\.venv\Scripts\python.exe tools\configure_tsinghua_seafile.py` locally after changing any password previously sent through chat. The prompt hides the password, exchanges it for an API token, writes only the token to the ignored `.env`, and clears stored username/password fields.
 - The Agent creates the remote session directory when the workspace is initialized, then uploads changed files after every workflow stage, checkpoint, final delivery, and user upload.
