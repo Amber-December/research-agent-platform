@@ -19,9 +19,11 @@ class StateStore:
         self.sessions_dir = self.root / "sessions"
         self.tasks_dir = self.root / "tasks"
         self.cloud_auth_dir = self.root / "cloud-auth"
+        self.user_flags_dir = self.root / "user-flags"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.cloud_auth_dir.mkdir(parents=True, exist_ok=True)
+        self.user_flags_dir.mkdir(parents=True, exist_ok=True)
 
     def _session_path(self, session_id: str) -> Path:
         return self.sessions_dir / f"{session_id}.json"
@@ -31,6 +33,9 @@ class StateStore:
 
     def _cloud_auth_path(self, user_id: str) -> Path:
         return self.cloud_auth_dir / f"{self._slug(user_id)}.json"
+
+    def _user_flag_path(self, user_id: str) -> Path:
+        return self.user_flags_dir / f"{self._slug(user_id)}.json"
 
     def create_session(self, user_id: str = "local") -> ChatSession:
         session = ChatSession(user_id=user_id or "local")
@@ -86,6 +91,13 @@ class StateStore:
             self._cloud_auth_path(profile.user_id),
             profile.model_dump_json(indent=2),
         )
+
+    def consume_first_turn_intro(self, user_id: str) -> bool:
+        path = self._user_flag_path(user_id)
+        if path.exists():
+            return False
+        self._write_json(path, json.dumps({"intro_sent": True}, ensure_ascii=False, indent=2))
+        return True
 
     def delete_cloud_auth(self, user_id: str) -> None:
         self._cloud_auth_path(user_id).unlink(missing_ok=True)

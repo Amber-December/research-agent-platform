@@ -565,7 +565,11 @@ CHAT_PAGE = """<!doctype html>
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || `请求失败 (${response.status})`);
         renderState(data);
-        if (!data.task_id) renderMessage("assistant", data.text || "No response");
+        if (!data.task_id) {
+          renderMessage("assistant", data.text || "No response");
+        } else if (data.text && data.status === "running") {
+          renderMessage("assistant", data.text);
+        }
         if (data.task_id && data.status === "running") subscribeTaskStream(data.task_id);
       } catch (error) {
         renderMessage("assistant", String(error.message || error));
@@ -678,6 +682,29 @@ agent = ResearchAgentService()
 background_tasks: dict[str, asyncio.Task[Any]] = {}
 Path(config.artifact_root).mkdir(parents=True, exist_ok=True)
 
+FIRST_TURN_INTRO = (
+    "我是科研智能体(ResearchAgent)，可以使用“/”完成以下功能:\n"
+    "-文献综述:/review\n"
+    "-选题与点子发散:/idea\n"
+    "-实验方案与计划:/plan\n"
+    "-代码与实现:/code\n"
+    "-论文写作:/write\n"
+    "-rebuttal 回复审稿人:/rebuttal\n"
+    "-图表与可视化:/fig\n"
+    "-汇报与展示:/present\n"
+    "-研究记忆/资料整理:/wiki\n"
+    "你的问题已经接收到，请等待回复。"
+)
+BACKGROUND_ACK = "已经接收到您的请求，后台正在工作，请稍后..."
+
+
+def reserve_first_turn_intro(session_id: str | None, user_id: str) -> tuple[str, str]:
+    session = agent.store.get_or_create_session(session_id, user_id)
+    intro = ""
+    if agent.store.consume_first_turn_intro(session.user_id):
+        intro = FIRST_TURN_INTRO
+    return session.session_id, intro
+
 
 def task_status_payload(task_id: str, *, text: str = "") -> dict[str, Any]:
     task = agent.get_task(task_id)
@@ -692,9 +719,18 @@ def task_status_payload(task_id: str, *, text: str = "") -> dict[str, Any]:
     )
     payload = task.model_dump()
     session = agent.store.load_session(task.session_id)
+    response_text = task.response_text
+    if response_text and session:
+        response_text = agent._append_cloud_delivery_link(
+            response_text,
+            session,
+            has_artifacts=bool(task.artifacts),
+        )
+    status_text = text or response_text or task.summary or task.error
     payload.update(
         {
-            "text": text or task.response_text or task.summary or task.error,
+            "text": status_text,
+            "response_text": response_text,
             "artifacts": [artifact.model_dump() for artifact in task.artifacts[-6:]],
             "progress": task.progress_log[-10:],
             "progress_events": [event.model_dump() for event in task.progress_events[-50:]],
@@ -851,20 +887,32 @@ async def api_create_session(payload: dict[str, Any] | None = None) -> dict[str,
 
 @app.post("/api/agent/chat")
 async def api_agent_chat(payload: dict[str, Any]) -> dict[str, Any]:
-    result = await agent.start_chat(
+    user_id = str(payload.get("user_id") or "local")
+    message = str(payload.get("message", ""))
+    session = await agent._prepare_chat_session(
         payload.get("session_id"),
-        str(payload.get("message", "")),
-        str(payload.get("user_id") or "local"),
+        message,
+        user_id,
+        sync_workspace=False,
     )
-    task_id = result.get("task_id", "")
-    if task_id and result.get("status") == "running":
-        schedule_task(task_id, "start")
-        result["text"] = (
-            f"已创建任务 `{task_id}`，正在后台执行。"
-            "请查看右侧实时进度；如浏览器暂时断线，可重新打开页面恢复。"
-        )
-    return result
-
+    intro = ""
+    if agent.store.consume_first_turn_intro(session.user_id):
+        intro = FIRST_TURN_INTRO
+    task = await agent._create_chat_task(session, message, sync_workspace=False)
+    schedule_task(task.task_id, "start")
+    return {
+        "session_id": session.session_id,
+        "task_id": task.task_id,
+        "status": "running",
+        "command": task.command,
+        "workflow_title": task.workflow_title,
+        "artifact_root": task.artifact_root,
+        "artifacts": [],
+        "progress": task.progress_log[-10:],
+        "checkpoint": None,
+        "cloud_workspace": session.cloud_workspace.model_dump(),
+        "text": (f"{intro}\n\n" if intro else "") + BACKGROUND_ACK,
+    }
 
 @app.post("/api/session/files")
 async def api_upload_session_files(
@@ -1146,10 +1194,42 @@ async def chat_completions(
     if not latest_user:
         latest_user = "Please summarize the current task state."
 
-    agent_result = await agent.chat(session_id, latest_user, user_id)
     if payload.get("stream"):
+        session = await agent._prepare_chat_session(session_id, latest_user, user_id, sync_workspace=False)
+        intro = ""
+        if agent.store.consume_first_turn_intro(session.user_id):
+            intro = FIRST_TURN_INTRO
+        task = await agent._create_chat_task(session, latest_user, sync_workspace=False)
+        schedule_task(task.task_id, "start")
+
         async def event_stream():
-            yield _openai_stream_chunk(chat_completion_stream_payload(payload, agent_result))
+            if intro:
+                yield _openai_stream_chunk(
+                    chat_completion_stream_payload(
+                        payload,
+                        {
+                            "text": intro,
+                            "task_id": "",
+                            "status": "running",
+                            "artifact_root": "",
+                            "session_id": session.session_id,
+                            "progress": [],
+                        },
+                    )
+                )
+            yield _openai_stream_chunk(
+                chat_completion_stream_payload(
+                    payload,
+                    {
+                        "text": BACKGROUND_ACK,
+                        "task_id": task.task_id,
+                        "status": "running",
+                        "artifact_root": task.artifact_root,
+                        "session_id": session.session_id,
+                        "progress": task.progress_log[-10:],
+                    },
+                )
+            )
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(
@@ -1161,6 +1241,7 @@ async def chat_completions(
                 "X-Accel-Buffering": "no",
             },
         )
+    agent_result = await agent.chat(session_id, latest_user, user_id)
     return chat_completion_payload(payload, agent_result)
 
 
@@ -1201,3 +1282,7 @@ async def responses(
             "progress": result.get("progress", []),
         },
     }
+
+
+
+

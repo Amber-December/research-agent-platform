@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -18,6 +18,7 @@ def test_agent_chat_returns_running_task_and_sse_delivers_events(service: Resear
         )
         task_id = response["task_id"]
         assert response["status"] == "running"
+        assert "科研智能体(ResearchAgent)" in response["text"]
         running_task = api_module.background_tasks[task_id]
 
         stream_response = await api_module.api_task_events(task_id)
@@ -68,6 +69,7 @@ def test_plain_question_uses_sse_progress_without_hidden_chain_of_thought(
         )
         task_id = response["task_id"]
         assert response["status"] == "running"
+        assert "科研智能体(ResearchAgent)" in response["text"]
         running_task = api_module.background_tasks[task_id]
         stream_response = await api_module.api_task_events(task_id)
         events = []
@@ -90,3 +92,5 @@ def test_plain_question_uses_sse_progress_without_hidden_chain_of_thought(
         assert events[-1][1]["task"]["response_text"]
 
     asyncio.run(scenario())
+
+

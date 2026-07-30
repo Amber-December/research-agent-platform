@@ -76,13 +76,8 @@ class LangGraphWorkflowRuntime:
             raise ValueError(f"Unknown task: {task_id}")
         checkpoint = self._pending_checkpoint(task)
         if task.status == "completed":
-            wiki_note = self._latest_wiki_note(task)
-            text = (
-                f"{workflow.title} 已完成。产物已写入本会话工作区并完成交付。"
-                f"任务记录位于 `{self._session_relative_path(task, wiki_note)}`。"
-                if wiki_note
-                else f"{workflow.title} 已完成。产物已写入本会话工作区并完成交付。"
-            )
+            final_artifact = self._final_delivery_artifact(task, workflow)
+            text = self._completed_text(workflow.title, task, final_artifact)
         elif task.status == "failed":
             text = task.error or f"{workflow.title} 执行失败。"
         else:
@@ -298,6 +293,47 @@ class LangGraphWorkflowRuntime:
             return Path(path).resolve().relative_to(Path(task.artifact_root).resolve()).as_posix()
         except ValueError:
             return path
+
+    def _completed_text(self, title: str, task: TaskRun, final_artifact: str) -> str:
+        artifact_path = self._session_relative_path(task, final_artifact) if final_artifact else ""
+        if artifact_path:
+            return f"{title} 已完成。最终产物位于 `{artifact_path}`。"
+        return f"{title} 已完成。最终产物已写入本会话工作区。"
+
+    def _final_delivery_artifact(self, task: TaskRun, workflow: WorkflowDefinition) -> str:
+        command = workflow.command
+        if command == "/fig":
+            for path in ("figures/generated/FIGURE_01.png", "figures/FIGURE_01.png"):
+                if self._artifact_exists(task, path):
+                    return path
+        if command == "/present":
+            for path in ("presentation/PAPER_TALK.pptx", "presentation/STAGE_REPORT.pptx"):
+                if self._artifact_exists(task, path):
+                    return path
+        if command == "/write":
+            for path in ("paper/PAPER_REVISED_AFTER_REVIEW.md", "paper/PAPER_REVISED.md", "paper/PAPER_DRAFT.md"):
+                if self._artifact_exists(task, path):
+                    return path
+        if command == "/idea":
+            for path in ("idea/FINAL_IDEA.md", "idea/docs/research_contract.md"):
+                if self._artifact_exists(task, path):
+                    return path
+        if command == "/plan":
+            for path in ("plan/EXECUTION_CHECKLIST.md", "plan/EXPERIMENT_PLAN.md", "plan/RESEARCH_BLUEPRINT.md"):
+                if self._artifact_exists(task, path):
+                    return path
+        if command == "/rebuttal":
+            for path in ("rebuttal/REVISION_LEDGER.md", "rebuttal/REBUTTAL_DRAFT.md"):
+                if self._artifact_exists(task, path):
+                    return path
+        if command == "/review":
+            for path in ("bib/RESEARCH_GAPS.md", "bib/EVIDENCE_MAP.md", "bib/LITERATURE_REVIEW.md"):
+                if self._artifact_exists(task, path):
+                    return path
+        return ""
+
+    def _artifact_exists(self, task: TaskRun, relative_path: str) -> bool:
+        return any(artifact.relative_path == relative_path for artifact in task.artifacts)
 
     def _approval_waiting_summary(
         self,

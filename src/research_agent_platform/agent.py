@@ -161,15 +161,22 @@ class ResearchAgentService:
         self.store.save_session(latest_session)
         return {"session_id": latest_session.session_id, **reply}
 
-    async def start_chat(self, session_id: str | None, message: str, user_id: str | None = None) -> dict:
-        session = await self._prepare_chat_session(session_id, message, user_id)
+    async def start_chat(
+        self,
+        session_id: str | None,
+        message: str,
+        user_id: str | None = None,
+        *,
+        sync_workspace: bool = True,
+    ) -> dict:
+        session = await self._prepare_chat_session(session_id, message, user_id, sync_workspace=sync_workspace)
         active_task = self.store.load_task(session.active_task_id) if session.active_task_id else None
         if active_task and active_task.status == "waiting_human":
             reply = await self._handle_waiting_task(session, active_task, message)
         else:
             route = explicit_route(message)
             if route is None:
-                task = await self._create_chat_task(session, message)
+                task = await self._create_chat_task(session, message, sync_workspace=sync_workspace)
                 reply = self._build_reply(
                     task,
                     text=(
@@ -178,16 +185,13 @@ class ResearchAgentService:
                     ),
                 )
             else:
-                task = await self._create_task(session, message, route)
+                task = await self._create_task(session, message, route, sync_workspace=sync_workspace)
                 if task.status == "failed":
                     reply = self._build_reply(task, text=task.error or task.summary)
                 else:
                     reply = self._build_reply(
                         task,
-                        text=(
-                            f"已创建任务 `{task.task_id}`，正在后台执行 {task.workflow_title}。"
-                            "实时进度将通过 SSE 推送，页面断线时可由任务状态接口恢复。"
-                        ),
+                        text="已经接收到您的请求，后台正在工作，请稍后...",
                     )
         latest_session = self.store.load_session(session.session_id) or session
         latest_session.history.append(MessageRecord(role="assistant", content=reply["text"]))
@@ -238,6 +242,7 @@ class ResearchAgentService:
         session.history.append(MessageRecord(role="assistant", content=response))
         self.store.save_task(task)
         self.store.save_session(session)
+        await self.sync_task_workspace(task)
         return self._build_reply(task, text=response)
 
     async def execute_task(self, task_id: str) -> dict:
@@ -265,7 +270,7 @@ class ResearchAgentService:
         return result
 
     async def _prepare_chat_session(
-        self, session_id: str | None, message: str, user_id: str | None
+        self, session_id: str | None, message: str, user_id: str | None, *, sync_workspace: bool = True
     ) -> ChatSession:
         session = self.store.get_or_create_session(session_id, user_id or "local")
         workspace_root = self.artifacts.session_root(
@@ -273,7 +278,7 @@ class ResearchAgentService:
             session_id=session.session_id,
         )
         session.workspace_root = str(workspace_root.resolve())
-        if config.cloud_sync_enabled and session.cloud_workspace.status != "synced":
+        if sync_workspace and config.cloud_sync_enabled and session.cloud_workspace.status != "synced":
             await self.sync_session_workspace(session)
         session.history.append(MessageRecord(role="user", content=message))
         self.store.save_session(session)
@@ -657,8 +662,15 @@ class ResearchAgentService:
 
         return await self._resume_after_approval(session, task, approved=False, feedback=message)
 
-    async def _start_task(self, session: ChatSession, message: str, route: RouteDecision) -> dict:
-        task = await self._create_task(session, message, route)
+    async def _start_task(
+        self,
+        session: ChatSession,
+        message: str,
+        route: RouteDecision,
+        *,
+        sync_workspace: bool = True,
+    ) -> dict:
+        task = await self._create_task(session, message, route, sync_workspace=sync_workspace)
         if task.status == "failed":
             return self._build_reply(task, text=task.error or task.summary)
         try:
@@ -669,7 +681,14 @@ class ResearchAgentService:
             await self.sync_task_workspace(failed_task)
             return self._build_reply(failed_task, text=str(exc))
 
-    async def _create_task(self, session: ChatSession, message: str, route: RouteDecision) -> TaskRun:
+    async def _create_task(
+        self,
+        session: ChatSession,
+        message: str,
+        route: RouteDecision,
+        *,
+        sync_workspace: bool = True,
+    ) -> TaskRun:
         workflow = self.workflows[route.command]
         task = TaskRun(
             session_id=session.session_id,
@@ -685,7 +704,8 @@ class ResearchAgentService:
             session_id=task.session_id,
         )
         task.artifact_root = str(task_root.resolve())
-        await self.sync_session_workspace(session, task=task)
+        if sync_workspace:
+            await self.sync_session_workspace(session, task=task)
         self._configure_task_inputs(task, session, task_root=task_root)
         self._log_progress(task, f"已路由到 {route.command} | 来源: {route.source} | 原因: {route.reason}")
         session.active_task_id = task.task_id
@@ -739,7 +759,13 @@ class ResearchAgentService:
                 self.store.save_session(session)
                 return task
 
-    async def _create_chat_task(self, session: ChatSession, message: str) -> TaskRun:
+    async def _create_chat_task(
+        self,
+        session: ChatSession,
+        message: str,
+        *,
+        sync_workspace: bool = True,
+    ) -> TaskRun:
         task_root = self.artifacts.task_root(
             f"chat-{session.session_id}",
             user_id=session.user_id,
@@ -755,7 +781,8 @@ class ResearchAgentService:
             artifact_root=str(task_root.resolve()),
             current_stage_name="routing",
         )
-        await self.sync_session_workspace(session, task=task)
+        if sync_workspace:
+            await self.sync_session_workspace(session, task=task)
         self._log_progress(task, "问题已接收，准备分析请求类型", kind="router")
         session.active_task_id = task.task_id
         self.store.save_task(task)
@@ -2161,7 +2188,7 @@ class ResearchAgentService:
         latest_artifacts = [artifact.model_dump() for artifact in task.artifacts[-6:]]
         session = self.store.load_session(task.session_id)
         return {
-            "text": self._append_cloud_delivery_link(text, session),
+            "text": self._append_cloud_delivery_link(text, session, has_artifacts=bool(task.artifacts)),
             "task_id": task.task_id,
             "status": task.status,
             "command": task.command,
@@ -2177,17 +2204,22 @@ class ResearchAgentService:
         self,
         text: str,
         session: ChatSession | None,
+        *,
+        has_artifacts: bool = False,
     ) -> str:
-        if session is None or session.cloud_workspace.status != "synced":
+        if not has_artifacts or session is None or session.cloud_workspace.status != "synced":
             return text
-        cloud_url = (
-            session.cloud_workspace.preview_url
-            or session.cloud_workspace.download_url
-            or session.cloud_workspace.share_url
-        )
+        cloud_url = self._cloud_workspace_url(session.cloud_workspace)
         if not cloud_url or cloud_url in text:
             return text
         return f"{text}\n\n清华网盘预览/下载链接：{cloud_url}"
+
+    def _cloud_workspace_url(self, cloud_workspace: CloudWorkspaceState) -> str:
+        return (
+            cloud_workspace.preview_url
+            or cloud_workspace.download_url
+            or cloud_workspace.share_url
+        )
 
     def enforce_cloud_delivery(
         self,
@@ -2196,11 +2228,7 @@ class ResearchAgentService:
     ) -> None:
         if not config.cloud_delivery_required:
             return
-        cloud_url = (
-            cloud_workspace.preview_url
-            or cloud_workspace.download_url
-            or cloud_workspace.share_url
-        )
+        cloud_url = self._cloud_workspace_url(cloud_workspace)
         if cloud_workspace.status == "synced" and cloud_url:
             return
         detail = cloud_workspace.error or cloud_workspace.configuration_hint or cloud_workspace.status
@@ -2254,9 +2282,11 @@ class ResearchAgentService:
         self.store.save_session(session)
         if task:
             if result.status == "synced":
+                cloud_url = self._cloud_workspace_url(session.cloud_workspace)
+                link_suffix = f"；清华网盘工作区：{cloud_url}" if cloud_url else ""
                 self._log_progress(
                     task,
-                    f"Cloud workspace synced: {result.uploaded_files} updated files -> {result.remote_path}",
+                    f"已同步 {result.uploaded_files} 个更新文件到清华网盘 {result.remote_path}{link_suffix}",
                     kind="cloud",
                 )
             elif result.status == "error":

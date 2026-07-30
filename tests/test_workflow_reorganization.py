@@ -9,9 +9,9 @@ import httpx
 from research_agent_platform import agent as agent_module
 from research_agent_platform.agent import ResearchAgentService
 from research_agent_platform.config import config
-from research_agent_platform.connectors.seafile import SeafileWorkspaceSync
+from research_agent_platform.connectors.seafile import SeafileSyncResult, SeafileWorkspaceSync
 from research_agent_platform.graphs.workflows import workflow_registry
-from research_agent_platform.models import ChatSession, CloudWorkspaceState, TaskRun
+from research_agent_platform.models import ArtifactRecord, ChatSession, CloudWorkspaceState, TaskRun
 from research_agent_platform.router.intent import route_message
 
 
@@ -127,12 +127,22 @@ def test_completed_reply_includes_cloud_delivery_link(service: ResearchAgentServ
         status="completed",
         artifact_root=session.workspace_root,
     )
+    run.artifacts.append(
+        ArtifactRecord(
+            name="figure.png",
+            kind="image",
+            relative_path="figures/figure.png",
+            absolute_path=f"{session.workspace_root}\\figures\\figure.png",
+            url_path="/workspace-files/figures/figure.png",
+            description="final figure",
+        )
+    )
     service.store.save_task(run)
 
-    reply = service._build_reply(run, text="图表已生成。")
+    reply = service.runtime.build_reply(run.task_id, service.workflows["/fig"])
 
+    assert "最终产物已写入本会话工作区" in reply["text"]
     assert "清华网盘预览/下载链接" in reply["text"]
-    assert "https://cloud.example/d/session-link" in reply["text"]
 
 
 def test_required_cloud_delivery_fails_without_share_link(service: ResearchAgentService, monkeypatch):
@@ -157,6 +167,42 @@ def test_required_cloud_delivery_fails_without_share_link(service: ResearchAgent
     assert "清华网盘交付失败" in failed.error
 
 
+def test_runtime_completed_reply_uses_final_artifact_path(service: ResearchAgentService):
+    session = service.store.create_session()
+    session.cloud_workspace = CloudWorkspaceState(
+        status="synced",
+        configured=True,
+        preview_url="https://cloud.example/d/session-link",
+    )
+    service.store.save_session(session)
+    task = TaskRun(
+        session_id=session.session_id,
+        command="/write",
+        objective="write",
+        route_source="explicit",
+        workflow_title="Paper Writing Workflow",
+        status="completed",
+        artifact_root=session.workspace_root,
+    )
+    task.artifacts.append(
+        ArtifactRecord(
+            name="paper.md",
+            kind="report",
+            relative_path="paper/PAPER_REVISED.md",
+            absolute_path=f"{session.workspace_root}\\paper\\PAPER_REVISED.md",
+            url_path="/workspace-files/paper/PAPER_REVISED.md",
+            description="final paper",
+        )
+    )
+    service.store.save_task(task)
+
+    reply = service.runtime.build_reply(task.task_id, service.workflows["/write"])
+
+    assert "最终产物位于" in reply["text"]
+    assert "paper/PAPER_REVISED.md" in reply["text"]
+    assert "任务记录位于" not in reply["text"]
+
+
 def test_workflow_completes_only_after_cloud_link_is_ready(service: ResearchAgentService, monkeypatch):
     observed_statuses: list[str] = []
 
@@ -179,6 +225,63 @@ def test_workflow_completes_only_after_cloud_link_is_ready(service: ResearchAgen
     assert "running" in observed_statuses
     assert result["status"] == "completed"
     assert "https://cloud.example/d/ready" in result["text"]
+
+
+def test_completed_reply_without_artifacts_omits_cloud_delivery_link(service: ResearchAgentService):
+    session = service.store.create_session()
+    session.cloud_workspace = CloudWorkspaceState(
+        status="synced",
+        configured=True,
+        preview_url="https://cloud.example/d/session-link",
+    )
+    service.store.save_session(session)
+    run = TaskRun(
+        session_id=session.session_id,
+        command="/chat",
+        objective="hello",
+        route_source="chat",
+        workflow_title="Chat Response",
+        status="completed",
+        artifact_root=session.workspace_root,
+        response_text="这是最终回复。",
+    )
+    service.store.save_task(run)
+
+    reply = service._build_reply(run, text="这是最终回复。")
+
+    assert "清华网盘预览/下载链接" not in reply["text"]
+
+
+def test_cloud_sync_progress_includes_workspace_link(service: ResearchAgentService, monkeypatch):
+    session = service.store.create_session()
+    task = TaskRun(
+        session_id=session.session_id,
+        command="/chat",
+        objective="hello",
+        route_source="chat",
+        workflow_title="Chat Response",
+        status="running",
+        artifact_root=session.workspace_root,
+    )
+    service.store.save_task(task)
+
+    async def fake_sync_workspace(*args, **kwargs):
+        return SeafileSyncResult(
+            status="synced",
+            remote_path="/research-agent/local/session",
+            share_url="https://cloud.example/d/session-link",
+            preview_url="https://cloud.example/d/session-link",
+            download_url="https://cloud.example/d/session-link",
+            synced_files=1,
+            uploaded_files=1,
+        )
+
+    monkeypatch.setattr(service.cloud, "sync_workspace", fake_sync_workspace)
+    asyncio.run(service.sync_task_workspace(task))
+
+    synced = service.get_task(task.task_id)
+    assert synced is not None
+    assert any("清华网盘工作区：https://cloud.example/d/session-link" in item for item in synced.progress_log)
 
 
 def test_plan_does_not_trigger_literature_search(service: ResearchAgentService, monkeypatch):

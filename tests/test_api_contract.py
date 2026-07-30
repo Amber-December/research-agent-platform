@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from research_agent_platform import api as api_module
 from research_agent_platform import agent as agent_module
+from research_agent_platform.models import ArtifactRecord, CloudWorkspaceState, TaskRun
 
 
 BLOCKING_PRESENTATION_DECISION = (
@@ -64,6 +65,7 @@ def test_openai_compatible_chat_completion_streams_done_marker(service, monkeypa
     assert response.status_code == 200
     assert "data: " in body
     assert "chat.completion.chunk" in body
+    assert "科研智能体(ResearchAgent)" in body
     assert "data: [DONE]" in body
 
 
@@ -387,6 +389,97 @@ def test_task_status_payload_supports_progress_polling(service, monkeypatch):
     assert payload["artifacts"]
 
 
+def test_task_status_payload_appends_cloud_link_to_response_text(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    session = service.store.create_session()
+    session.cloud_workspace = CloudWorkspaceState(
+        status="synced",
+        configured=True,
+        preview_url="https://cloud.example/d/session-link",
+    )
+    service.store.save_session(session)
+    task = TaskRun(
+        session_id=session.session_id,
+        command="/chat",
+        objective="hello",
+        route_source="chat",
+        workflow_title="Chat Response",
+        status="completed",
+        artifact_root=session.workspace_root,
+        response_text="这是最终回复。",
+    )
+    task.artifacts.append(
+        ArtifactRecord(
+            name="report.md",
+            kind="report",
+            relative_path="report.md",
+            absolute_path=f"{session.workspace_root}\\report.md",
+            url_path="/workspace-files/report.md",
+            description="final report",
+        )
+    )
+    service.store.save_task(task)
+
+    payload = api_module.task_status_payload(task.task_id)
+
+    assert "清华网盘预览/下载链接" in payload["response_text"]
+    assert "https://cloud.example/d/session-link" in payload["response_text"]
+    assert payload["text"] == payload["response_text"]
+
+
+def test_task_status_payload_omits_cloud_link_without_artifacts(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    session = service.store.create_session()
+    session.cloud_workspace = CloudWorkspaceState(
+        status="synced",
+        configured=True,
+        preview_url="https://cloud.example/d/session-link",
+    )
+    service.store.save_session(session)
+    task = TaskRun(
+        session_id=session.session_id,
+        command="/chat",
+        objective="hello",
+        route_source="chat",
+        workflow_title="Chat Response",
+        status="completed",
+        artifact_root=session.workspace_root,
+        response_text="这是最终回复。",
+    )
+    service.store.save_task(task)
+
+    payload = api_module.task_status_payload(task.task_id)
+
+    assert "清华网盘预览/下载链接" not in payload["response_text"]
+    assert payload["text"] == "这是最终回复。"
+
+
+def test_task_status_payload_omits_cloud_link_when_artifacts_missing(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    session = service.store.create_session()
+    session.cloud_workspace = CloudWorkspaceState(
+        status="synced",
+        configured=True,
+        preview_url="https://cloud.example/d/session-link",
+    )
+    service.store.save_session(session)
+    task = TaskRun(
+        session_id=session.session_id,
+        command="/chat",
+        objective="hello",
+        route_source="chat",
+        workflow_title="Chat Response",
+        status="completed",
+        artifact_root=session.workspace_root,
+        response_text="这是最终回复。",
+    )
+    service.store.save_task(task)
+
+    payload = api_module.task_status_payload(task.task_id)
+
+    assert "清华网盘预览/下载链接" not in payload["response_text"]
+
+
 def test_chat_page_contains_task_polling_and_restore(service, monkeypatch):
     monkeypatch.setattr(api_module, "agent", service)
     client = TestClient(api_module.app)
@@ -407,3 +500,4 @@ def test_chat_page_contains_task_polling_and_restore(service, monkeypatch):
     assert 'class="sidebar"' not in response.text
     assert 'id="drop-zone"' not in response.text
     assert 'id="upload-target"' not in response.text
+
