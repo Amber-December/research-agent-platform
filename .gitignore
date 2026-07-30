@@ -11,6 +11,7 @@ wheels/
 
 # Local secrets
 /.env
+/.env.bake
 # Runtime state and generated workspaces
 agent-workspace/
 /.agent-state/
