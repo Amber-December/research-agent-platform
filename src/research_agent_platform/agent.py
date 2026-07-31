@@ -5,12 +5,14 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 
 from .connectors import ScholarSearchService, SeafileWorkspaceSync
 from .artifacts.store import ArtifactStore
 from .config import config
+from .context import discover_pdf_sources, resolve_local_research_context
 from .document_exports import (
     detect_write_formats,
     markdown_to_docx_bytes,
@@ -28,6 +30,7 @@ from .literature_sources import (
     resolve_download_source_config,
 )
 from .memory.wiki import WikiService
+from .memory.store import ResearchWikiStore, WikiPaper
 from .models import (
     ApprovalCheckpoint,
     ChatSession,
@@ -89,7 +92,7 @@ from .router.intent import (
     route_message,
 )
 from .state.store import StateStore
-from .upstream import generate_image, generate_text
+from .upstream import configured_model_for_role, generate_image, generate_text
 
 
 CLOUD_DELIVERY_SYSTEM_POLICY = (
@@ -915,7 +918,7 @@ class ResearchAgentService:
     ):
         support_artifacts, support_context = await self._prepare_stage_support(task, stage)
         for artifact in support_artifacts:
-            task.artifacts.append(artifact)
+            self._upsert_task_artifact(task, artifact)
         if task.command == "/rebuttal" and stage.name == "rebuttal_intake":
             if task.rebuttal_source is None:
                 raise RebuttalInputError("/rebuttal input SourceSet is missing.")
@@ -960,13 +963,51 @@ class ResearchAgentService:
         if support_context:
             prompt["user"] = support_context + "\n" + prompt["user"]
         self._log_progress(task, f"正在调用上游模型生成阶段内容: {stage.title}", kind="model")
-        content = await generate_text(
-            system_prompt=prompt["system"],
-            user_prompt=prompt["user"],
-            temperature=0.35,
-        )
+        selected_model = configured_model_for_role(stage.model_role)
+        fallback_model = config.upstream_model or None
+        fallback_used = False
+        started = time.monotonic()
+        try:
+            content = await generate_text(
+                system_prompt=prompt["system"],
+                user_prompt=prompt["user"],
+                model=selected_model,
+                temperature=0.35,
+            )
+        except Exception:
+            if (
+                task.command != "/idea"
+                or not fallback_model
+                or not selected_model
+                or fallback_model == selected_model
+            ):
+                raise
+            fallback_used = True
+            self._log_progress(
+                task,
+                f"阶段模型不可用，回退到默认模型: {stage.title}",
+                kind="model",
+            )
+            content = await generate_text(
+                system_prompt=prompt["system"],
+                user_prompt=prompt["user"],
+                model=fallback_model,
+                temperature=0.35,
+            )
         if not content.strip():
             raise RuntimeError(f"Empty content from upstream for stage {stage.name}")
+        evidence_validation: dict | None = None
+        if task.command == "/idea" and stage.name == "final_idea":
+            content, evidence_validation = self._validate_idea_evidence(task, content)
+        if task.command == "/idea":
+            self._record_idea_trace(
+                task,
+                stage,
+                selected_model=fallback_model if fallback_used else selected_model,
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                fallback_used=fallback_used,
+                evidence_validation=evidence_validation,
+            )
         self._log_progress(task, f"上游模型已返回阶段内容: {stage.title}", kind="model")
         artifact = self._write_text(
             task,
@@ -1069,6 +1110,17 @@ class ResearchAgentService:
             return support_artifacts, "\n\n".join(support_context_parts)
         if task.command == "/review":
             return await self._prepare_review_support(task, stage)
+        wiki_has_evidence = False
+        if task.command in {"/wiki", "/idea"}:
+            wiki_artifacts, wiki_context, wiki_has_evidence = await self._prepare_research_wiki_support(
+                task,
+                stage,
+            )
+            support_artifacts.extend(wiki_artifacts)
+            if wiki_context:
+                support_context_parts.append(wiki_context)
+            if task.command == "/wiki":
+                return support_artifacts, "\n\n".join(support_context_parts)
         if task.command not in {"/review", "/idea"}:
             return support_artifacts, "\n\n".join(support_context_parts)
         if task.command == "/idea":
@@ -1079,6 +1131,8 @@ class ResearchAgentService:
             existing_evidence = next((path for path in evidence_paths if path.exists()), None)
             if existing_evidence:
                 support_context_parts.append(self._file_excerpt(str(existing_evidence), 5000))
+                return support_artifacts, "\n\n".join(support_context_parts)
+            if wiki_has_evidence:
                 return support_artifacts, "\n\n".join(support_context_parts)
         query = self._search_query_for_task(task.objective)
         if not query:
@@ -1106,6 +1160,117 @@ class ResearchAgentService:
         support_artifacts.extend([md_artifact, json_artifact])
         support_context_parts.append(bundle.prompt_excerpt())
         return support_artifacts, "\n\n".join(support_context_parts)
+
+    async def _prepare_research_wiki_support(
+        self,
+        task: TaskRun,
+        stage: StageDefinition,
+    ) -> tuple[list, str, bool]:
+        workspace_root = Path(task.artifact_root)
+        wiki_store = ResearchWikiStore(workspace_root)
+        artifacts: list = []
+        source_refs = discover_pdf_sources(workspace_root)
+        for source_ref in source_refs:
+            paper = wiki_store.paper_for_source(source_ref)
+            wiki_store.ensure_pdf_copy(paper)
+            artifacts.append(
+                self._record_existing(
+                    task,
+                    paper.wiki_pdf_relative_path,
+                    kind="document",
+                    description=f"Wiki PDF copy for {paper.paper_id}.",
+                )
+            )
+            evidence_records = collect_paper_evidence(workspace_root, [source_ref], total_limit=14000)
+            if not wiki_store.summary_exists(paper):
+                generated_summary = await self._generate_wiki_paper_summary(
+                    task,
+                    paper,
+                    evidence_records,
+                )
+                summary_content = wiki_store.paper_summary_markdown(paper, generated_summary)
+                summary_artifact = self._write_text(
+                    task,
+                    paper.summary_relative_path,
+                    summary_content,
+                    kind="wiki",
+                    description=f"Per-paper Wiki summary for {paper.paper_id}.",
+                )
+            else:
+                summary_artifact = self._record_existing(
+                    task,
+                    paper.summary_relative_path,
+                    kind="wiki",
+                    description=f"Per-paper Wiki summary for {paper.paper_id}.",
+                )
+            artifacts.append(summary_artifact)
+
+        index_artifact = self._write_text(
+            task,
+            "wiki/index.md",
+            wiki_store.rebuild_index(),
+            kind="wiki",
+            description="Research Wiki paper index.",
+        )
+        artifacts.append(index_artifact)
+
+        query = task.objective
+        if task.command == "/idea" and stage.name == "idea_verification":
+            query = f"{task.objective} 最近前例 反对证据 失败条件 实验范式"
+        query_pack = wiki_store.query_pack(query)
+        query_pack_artifact = self._write_text(
+            task,
+            "wiki/query_pack.md",
+            query_pack,
+            kind="wiki",
+            description="Topic-focused Wiki retrieval pack.",
+        )
+        artifacts.append(query_pack_artifact)
+
+        local_context = resolve_local_research_context(workspace_root, task.objective)
+        context_parts = ["Research Wiki retrieval context:\n" + query_pack[:9000]]
+        if local_context.context_text:
+            context_parts.append("Local PDF evidence:\n" + local_context.context_text[:9000])
+        if local_context.limitations:
+            context_parts.append("Evidence limitations:\n- " + "\n- ".join(local_context.limitations))
+        return artifacts, "\n\n".join(context_parts), bool(wiki_store.list_papers())
+
+    async def _generate_wiki_paper_summary(
+        self,
+        task: TaskRun,
+        paper: WikiPaper,
+        evidence_records: list[dict],
+    ) -> str:
+        wiki_store = ResearchWikiStore(task.artifact_root)
+        evidence_context = paper_evidence_prompt(evidence_records, limit=14000)
+        if not evidence_context:
+            return wiki_store.fallback_summary(paper, evidence_records)
+        try:
+            return await generate_text(
+                system_prompt=(
+                    "You create faithful Chinese research Wiki summaries from page-linked evidence. "
+                    "Never invent facts, citations, datasets, results, limitations, or future work. "
+                    "Clearly mark model inference and uncertainty. Return markdown without a level-one title."
+                ),
+                user_prompt=(
+                    f"Paper ID: {paper.paper_id}\n"
+                    f"Source PDF: {paper.source_relative_path}\n\n"
+                    "Use exactly these sections: 研究问题, 核心方法, 数据集与实验设置, 主要结果, "
+                    "作者讨论与局限, 作者提出的未来工作, 可复用证据, 与其他论文的关系, "
+                    "对 Idea 生成的提示. Every factual point should cite an available Evidence ID and page. "
+                    "If the evidence does not support a section, write 未确认.\n\n"
+                    f"Evidence:\n{evidence_context}"
+                ),
+                model=config.upstream_model or None,
+                temperature=0.15,
+            )
+        except Exception as exc:
+            self._log_progress(
+                task,
+                f"论文 Wiki 总结调用失败，使用可追踪模板: {paper.paper_id} ({exc.__class__.__name__})",
+                kind="warning",
+            )
+            return wiki_store.fallback_summary(paper, evidence_records)
 
     async def _prepare_review_support(self, task: TaskRun, stage: StageDefinition) -> tuple[list, str]:
         workspace_root = Path(task.artifact_root)
@@ -1784,8 +1949,40 @@ class ResearchAgentService:
             kind="contract",
             description="Focused research contract for the selected idea.",
         )
-        task.artifacts.append(artifact)
+        self._upsert_task_artifact(task, artifact)
+        for wiki_artifact in self._write_idea_to_wiki(task):
+            self._upsert_task_artifact(task, wiki_artifact)
         self.store.save_task(task)
+
+    def _write_idea_to_wiki(self, task: TaskRun) -> list:
+        final_idea = self._artifact_text(task, "idea/FINAL_IDEA.md")
+        if not final_idea.strip():
+            return []
+        verification = self._artifact_text(task, "idea/IDEA_VERIFICATION.md")
+        query_pack = self._artifact_text(task, "wiki/query_pack.md")
+        wiki_store = ResearchWikiStore(task.artifact_root)
+        paper_ids = wiki_store.paper_ids_from_query_pack(query_pack)
+        idea_relative_path = wiki_store.write_idea_page(
+            task.task_id,
+            final_idea=final_idea,
+            verification=verification,
+            source_paper_ids=paper_ids,
+        )
+        relations_relative_path = wiki_store.append_idea_relations(task.task_id, paper_ids)
+        return [
+            self._record_existing(
+                task,
+                idea_relative_path,
+                kind="wiki",
+                description="Final Idea writeback into the Research Wiki.",
+            ),
+            self._record_existing(
+                task,
+                relations_relative_path,
+                kind="wiki",
+                description="Minimal Research Wiki relationship edges.",
+            ),
+        ]
 
     async def _write_figure_delivery_artifacts(self, task: TaskRun) -> list:
         briefs = self._artifact_text(task, "figures/FIGURE_BRIEFS.md")
@@ -2392,6 +2589,122 @@ class ResearchAgentService:
         self._schedule_cloud_sync(task.session_id)
         return artifact
 
+    def _record_existing(self, task: TaskRun, relative_path: str, *, kind, description: str):
+        artifact = self.artifacts.record_existing(
+            task.task_id,
+            self._canonical_artifact_path(relative_path),
+            kind=kind,
+            description=description,
+            task_root=task.artifact_root,
+        )
+        self._schedule_cloud_sync(task.session_id)
+        return artifact
+
+    def _upsert_task_artifact(self, task: TaskRun, artifact) -> None:
+        task.artifacts = [
+            existing
+            for existing in task.artifacts
+            if existing.relative_path != artifact.relative_path
+        ]
+        task.artifacts.append(artifact)
+
+    def _record_idea_trace(
+        self,
+        task: TaskRun,
+        stage: StageDefinition,
+        *,
+        selected_model: str | None,
+        elapsed_ms: float,
+        fallback_used: bool,
+        evidence_validation: dict | None,
+    ) -> None:
+        trace_path = Path(task.artifact_root) / "Content" / "IDEA_TRACE.json"
+        trace: dict = {
+            "task_id": task.task_id,
+            "orchestration": "single-herness-stage-routing",
+            "stages": [],
+        }
+        if trace_path.exists():
+            try:
+                loaded = json.loads(trace_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    trace.update(loaded)
+            except json.JSONDecodeError:
+                pass
+        stages = trace.setdefault("stages", [])
+        stages.append(
+            {
+                "stage": stage.name,
+                "model_role": stage.model_role,
+                "model": selected_model or "auto",
+                "fallback_used": fallback_used,
+                "elapsed_ms": elapsed_ms,
+                "recorded_at": utc_now(),
+            }
+        )
+        if evidence_validation is not None:
+            trace["evidence_validation"] = evidence_validation
+        trace_artifact = self._write_text(
+            task,
+            "Content/IDEA_TRACE.json",
+            json.dumps(trace, ensure_ascii=False, indent=2),
+            kind="note",
+            description="Idea stage model routing and evidence validation trace.",
+        )
+        self._upsert_task_artifact(task, trace_artifact)
+
+    def _validate_idea_evidence(self, task: TaskRun, content: str) -> tuple[str, dict]:
+        identifier_pattern = re.compile(r"\b(?:PE-[A-F0-9]{10}|P\d{3}|P-[A-F0-9]{12})\b", re.I)
+        workspace_root = Path(task.artifact_root)
+        evidence_paths = [
+            workspace_root / "bib" / "EVIDENCE_MAP.md",
+            workspace_root / "bib" / "LITERATURE_REVIEW.md",
+            workspace_root / "bib" / "LITERATURE_SEARCH.md",
+            workspace_root / "wiki" / "query_pack.md",
+        ]
+        evidence_paths.extend((workspace_root / "wiki" / "papers").glob("*/summary.md"))
+        allowed_ids: set[str] = set()
+        for path in evidence_paths:
+            if not path.exists():
+                continue
+            allowed_ids.update(
+                identifier.upper()
+                for identifier in identifier_pattern.findall(
+                    path.read_text(encoding="utf-8", errors="ignore")
+                )
+            )
+        referenced_ids = {
+            identifier.upper() for identifier in identifier_pattern.findall(content)
+        }
+        invalid_ids = sorted(referenced_ids - allowed_ids)
+        validated_content = content
+        for invalid_id in invalid_ids:
+            validated_content = re.sub(
+                rf"\b{re.escape(invalid_id)}\b",
+                f"UNVERIFIED({invalid_id})",
+                validated_content,
+                flags=re.I,
+            )
+        status = "pass"
+        if invalid_ids:
+            status = "needs_attention"
+            validated_content = (
+                validated_content.rstrip()
+                + "\n\n## Evidence Validation\n\n"
+                + "- Status: needs attention\n"
+                + "- 以下编号未出现在当前证据包中，已标记为未验证："
+                + ", ".join(f"`{identifier}`" for identifier in invalid_ids)
+                + "\n"
+            )
+        elif not referenced_ids:
+            status = "no_explicit_evidence_ids"
+        return validated_content, {
+            "status": status,
+            "allowed_ids": sorted(allowed_ids),
+            "referenced_ids": sorted(referenced_ids),
+            "invalid_ids": invalid_ids,
+        }
+
     def _schedule_cloud_sync(self, session_id: str) -> None:
         if not config.cloud_sync_enabled:
             return
@@ -2956,4 +3269,3 @@ class ResearchAgentService:
             if stripped.startswith(token):
                 return stripped[len(token) :].strip() or stripped
         return stripped
-

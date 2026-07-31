@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+from reportlab.pdfgen import canvas
+
+from research_agent_platform import agent as agent_module
+from research_agent_platform.agent import ResearchAgentService
+from research_agent_platform.config import config
+
+
+def _write_test_pdf(path: Path, text: str = "Graph neural network limitation and future work") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document = canvas.Canvas(str(path))
+    document.drawString(72, 760, text)
+    document.save()
+
+
+def _stage_markdown(user_prompt: str, *, invalid_reference: bool = False) -> str:
+    if "Current stage: Idea Candidates" in user_prompt:
+        return (
+            "# Idea Candidates\n\n"
+            "## Problem Frame\n- Topic.\n\n"
+            "## Candidate Ideas\n- A\n- B\n- C\n\n"
+            "## Comparative Assessment\n- A best.\n\n"
+            "## Recommended Candidate\n- A\n\n"
+            "## Risks and Unknowns\n- Evidence coverage.\n\n"
+            "## Decision Required\nNone."
+        )
+    if "Current stage: Idea Verification" in user_prompt:
+        return (
+            "# Idea Verification\n\n"
+            "## Candidate Under Review\n- A\n\n"
+            "## Closest Prior Work\n- Prior work.\n\n"
+            "## Novelty Stress Test\n- Narrow the claim.\n\n"
+            "## Feasibility Stress Test\n- Feasible.\n\n"
+            "## Disconfirming Evidence\n- None confirmed.\n\n"
+            "## Unresolved Questions\n- Data coverage.\n\n"
+            "## Verification Verdict\n- Keep with caveats."
+        )
+    if "Current stage: Final Idea" in user_prompt:
+        evidence = "[P001] and [P999]" if invalid_reference else "available Wiki evidence"
+        return (
+            "# Final Idea\n\n"
+            "## Problem Anchor\n- Topic.\n\n"
+            "## Method Thesis\n- A.\n\n"
+            "## Dominant Contribution\n- B.\n\n"
+            f"## Falsifiable Prediction\n- C based on {evidence}.\n\n"
+            "## Evidence Basis\n- Current evidence.\n\n"
+            "## Scope Boundary\n- E.\n\n"
+            "## Open Risks\n- F.\n\n"
+            "## Handoff to Plan\n- Ready."
+        )
+    if "Using the template and the idea artifacts" in user_prompt:
+        return "# Research Contract\n\n- Ready for /plan."
+    return "# Wiki Artifact\n\n- Grounded summary."
+
+
+def test_wiki_copies_pdf_and_creates_one_summary_per_paper(service: ResearchAgentService):
+    session = service.store.create_session()
+    source_pdf = Path(session.workspace_root, "paper", "uploads", "gnn-paper.pdf")
+    _write_test_pdf(source_pdf)
+
+    first = asyncio.run(service.chat(session.session_id, "/wiki 收录这篇 GNN 论文"))
+    second = asyncio.run(service.chat(session.session_id, "/wiki 更新论文知识"))
+
+    assert first["status"] == "completed"
+    assert second["status"] == "completed"
+    paper_directories = list(Path(session.workspace_root, "wiki", "papers").glob("P-*"))
+    assert len(paper_directories) == 1
+    assert Path(paper_directories[0], "source.pdf").exists()
+    summary = Path(paper_directories[0], "summary.md").read_text(encoding="utf-8")
+    assert "## 作者讨论与局限" in summary
+    assert "## 作者提出的未来工作" in summary
+    assert Path(session.workspace_root, "wiki", "index.md").exists()
+    query_pack = Path(session.workspace_root, "wiki", "query_pack.md")
+    assert query_pack.exists()
+    assert len(query_pack.read_text(encoding="utf-8")) <= 8000
+
+
+def test_idea_routes_each_stage_to_configured_model(
+    service: ResearchAgentService,
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "idea_generator_model", "generator-model")
+    monkeypatch.setattr(config, "idea_critic_model", "critic-model")
+    monkeypatch.setattr(config, "idea_final_model", "final-model")
+    stage_models: dict[str, str | None] = {}
+
+    async def capture_models(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        for stage_name in ("Idea Candidates", "Idea Verification", "Final Idea"):
+            if f"Current stage: {stage_name}" in user_prompt:
+                stage_models[stage_name] = model
+        return _stage_markdown(user_prompt)
+
+    monkeypatch.setattr(agent_module, "generate_text", capture_models)
+    result = asyncio.run(service.chat(None, "/idea 生成一个 GNN 研究方向"))
+
+    assert result["status"] == "completed"
+    assert stage_models == {
+        "Idea Candidates": "generator-model",
+        "Idea Verification": "critic-model",
+        "Final Idea": "final-model",
+    }
+    task = service.get_task(result["task_id"])
+    trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
+    assert [stage["model_role"] for stage in trace["stages"]] == [
+        "idea_generator",
+        "idea_critic",
+        "idea_finalizer",
+    ]
+
+
+def test_idea_stage_model_falls_back_to_upstream_model(
+    service: ResearchAgentService,
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "idea_generator_model", "unavailable-generator")
+    monkeypatch.setattr(config, "upstream_model", "default-model")
+    calls: list[str | None] = []
+
+    async def fail_then_fallback(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        calls.append(model)
+        if model == "unavailable-generator":
+            raise RuntimeError("model unavailable")
+        return _stage_markdown(user_prompt)
+
+    monkeypatch.setattr(agent_module, "generate_text", fail_then_fallback)
+    result = asyncio.run(service.chat(None, "/idea 测试模型回退"))
+    task = service.get_task(result["task_id"])
+    trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "completed"
+    assert calls[:2] == ["unavailable-generator", "default-model"]
+    assert trace["stages"][0]["fallback_used"] is True
+    assert trace["stages"][0]["model"] == "default-model"
+
+
+def test_final_idea_marks_unknown_evidence_ids(
+    service: ResearchAgentService,
+    monkeypatch,
+):
+    session = service.store.create_session()
+    evidence_map = Path(session.workspace_root, "bib", "EVIDENCE_MAP.md")
+    evidence_map.parent.mkdir(parents=True, exist_ok=True)
+    evidence_map.write_text("# Evidence Map\n\n- [P001] verified paper.\n", encoding="utf-8")
+
+    async def generate_with_invalid_id(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        return _stage_markdown(user_prompt, invalid_reference=True)
+
+    monkeypatch.setattr(agent_module, "generate_text", generate_with_invalid_id)
+    result = asyncio.run(service.chat(session.session_id, "/idea 基于现有证据生成方向"))
+    task = service.get_task(result["task_id"])
+    final_idea = Path(task.artifact_root, "idea", "FINAL_IDEA.md").read_text(encoding="utf-8")
+    trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "completed"
+    assert "UNVERIFIED(P999)" in final_idea
+    assert trace["evidence_validation"]["invalid_ids"] == ["P999"]
+
+
+def test_idea_auto_ingests_uploaded_pdf_and_writes_back_to_wiki(
+    service: ResearchAgentService,
+    monkeypatch,
+):
+    session = service.store.create_session()
+    source_pdf = Path(session.workspace_root, "paper", "uploads", "direct-idea.pdf")
+    _write_test_pdf(source_pdf, "Discussion identifies a graph generalization limitation")
+
+    async def generate_idea(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        return _stage_markdown(user_prompt)
+
+    monkeypatch.setattr(agent_module, "generate_text", generate_idea)
+    result = asyncio.run(service.chat(session.session_id, "/idea 基于上传论文提出方向"))
+    task = service.get_task(result["task_id"])
+
+    assert result["status"] == "completed"
+    paper_directories = list(Path(task.artifact_root, "wiki", "papers").glob("P-*"))
+    assert len(paper_directories) == 1
+    assert Path(paper_directories[0], "source.pdf").exists()
+    assert Path(paper_directories[0], "summary.md").exists()
+    assert Path(task.artifact_root, "wiki", "ideas", f"{task.task_id}.md").exists()
+    relations = Path(task.artifact_root, "wiki", "relations.jsonl").read_text(encoding="utf-8")
+    assert "idea_based_on" in relations

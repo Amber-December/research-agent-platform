@@ -12,6 +12,7 @@ class StageDefinition:
     artifact_kind: str
     required_sections: list[str]
     skill_paths: list[str] = field(default_factory=list)
+    model_role: str = "default"
     hitl: bool = False
     checkpoint_title: str = ""
 
@@ -144,15 +145,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Decision Required",
                     ],
                     skill_paths=_skills(
-                        "idea-discovery",
-                        "prior-art-search",
-                        "openalex",
-                        "semantic-scholar",
-                        "arxiv",
-                        "deepxiv",
-                        "comm-lit-review",
-                        "novelty-check",
+                        "platform-idea-generation",
                     ),
+                    model_role="idea_generator",
                     hitl=True,
                     checkpoint_title="Topic Selection Approval",
                 ),
@@ -177,12 +172,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Verification Verdict",
                     ],
                     skill_paths=_skills(
-                        "novelty-check",
-                        "prior-art-search",
-                        "kill-argument",
-                        "research-review",
-                        "idea-discovery-robot",
+                        "platform-idea-critique",
                     ),
+                    model_role="idea_critic",
                 ),
                 StageDefinition(
                     name="final_idea",
@@ -205,11 +197,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Handoff to Plan",
                     ],
                     skill_paths=_skills(
-                        "research-refine",
-                        "invention-structuring",
-                        "claims-drafting",
-                        "research-review",
+                        "platform-idea-finalization",
                     ),
+                    model_role="idea_finalizer",
                 ),
             ],
         ),
@@ -1089,10 +1079,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Reuse Cues",
                     ],
                     skill_paths=_skills(
-                        "research-wiki",
-                        "wiki-enrich",
-                        "research-review",
-                        "result-to-claim",
+                        "platform-research-wiki",
                     ),
                 ),
                 StageDefinition(
@@ -1107,9 +1094,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Future Retrieval Prompts",
                     ],
                     skill_paths=_skills(
-                        "research-wiki",
-                        "wiki-enrich",
-                        "research-pipeline",
+                        "platform-research-wiki",
                     ),
                 ),
             ],

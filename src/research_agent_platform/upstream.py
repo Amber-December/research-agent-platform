@@ -33,6 +33,15 @@ class GeneratedImage:
     output_format: str
 
 
+def configured_model_for_role(role: str) -> str | None:
+    role_models = {
+        "idea_generator": config.idea_generator_model,
+        "idea_critic": config.idea_critic_model,
+        "idea_finalizer": config.idea_final_model,
+    }
+    return role_models.get(role, "") or config.upstream_model or None
+
+
 def _headers() -> dict[str, str]:
     if not config.upstream_api_key:
         raise HTTPException(status_code=500, detail="Missing UPSTREAM_API_KEY")
