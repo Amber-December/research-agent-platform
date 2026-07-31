@@ -19,6 +19,7 @@ Produce one concise final Idea that can be handed to `/plan` without repeating t
 6. Include scope boundaries and open risks.
 7. Do not draft patent claims or invention-disclosure language.
 8. Do not invent a complete experiment plan.
+9. When the user's objective is Chinese, keep required section headings unchanged but write all explanatory prose in concise Simplified Chinese.
 
 ## Output
 

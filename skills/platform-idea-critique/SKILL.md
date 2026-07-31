@@ -19,6 +19,7 @@ Act as a fresh critic. Try to reject or narrow the recommended candidate before 
 6. Prefer one strong rejection argument over many generic comments.
 7. State whether the candidate should be kept, narrowed, revised, or rejected.
 8. Do not expand the result into a full experiment plan.
+9. When the user's objective is Chinese, keep required section headings unchanged but write all explanatory prose in concise Simplified Chinese.
 
 ## Output
 

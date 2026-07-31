@@ -7,6 +7,7 @@ from pathlib import Path
 from reportlab.pdfgen import canvas
 
 from research_agent_platform import agent as agent_module
+from research_agent_platform import upstream as upstream_module
 from research_agent_platform.agent import ResearchAgentService
 from research_agent_platform.config import config
 
@@ -88,11 +89,13 @@ def test_idea_routes_each_stage_to_configured_model(
     monkeypatch.setattr(config, "idea_critic_model", "critic-model")
     monkeypatch.setattr(config, "idea_final_model", "final-model")
     stage_models: dict[str, str | None] = {}
+    stage_system_prompts: list[str] = []
 
     async def capture_models(*, system_prompt, user_prompt, model=None, temperature=0.3):
         for stage_name in ("Idea Candidates", "Idea Verification", "Final Idea"):
             if f"Current stage: {stage_name}" in user_prompt:
                 stage_models[stage_name] = model
+                stage_system_prompts.append(system_prompt)
         return _stage_markdown(user_prompt)
 
     monkeypatch.setattr(agent_module, "generate_text", capture_models)
@@ -104,6 +107,8 @@ def test_idea_routes_each_stage_to_configured_model(
         "Idea Verification": "critic-model",
         "Final Idea": "final-model",
     }
+    assert len(stage_system_prompts) == 3
+    assert all("Simplified Chinese" in prompt for prompt in stage_system_prompts)
     task = service.get_task(result["task_id"])
     trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
     assert [stage["model_role"] for stage in trace["stages"]] == [
@@ -111,6 +116,29 @@ def test_idea_routes_each_stage_to_configured_model(
         "idea_critic",
         "idea_finalizer",
     ]
+
+
+def test_kimi_k2_temperature_is_normalized(monkeypatch):
+    captured_payload: dict = {}
+
+    async def capture_request(method, path, payload=None):
+        captured_payload.update(payload or {})
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(upstream_module, "_request", capture_request)
+    result = asyncio.run(
+        upstream_module.chat_completions(
+            {
+                "model": "Kimi-K2.6",
+                "messages": [{"role": "user", "content": "test"}],
+                "temperature": 0.35,
+            }
+        )
+    )
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert captured_payload["model"] == "Kimi-K2.6"
+    assert captured_payload["temperature"] == 1.0
 
 
 def test_idea_stage_model_falls_back_to_upstream_model(

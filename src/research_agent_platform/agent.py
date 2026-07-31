@@ -2780,6 +2780,14 @@ class ResearchAgentService:
                 "'Option A: ...' and 'Option B: ...', and 'Recommended Default: ...'. Missing fields cause the workflow to "
                 "choose its recommendation and continue automatically.\n\n"
             )
+        language_hint = ""
+        if re.search(r"[\u4e00-\u9fff]", task.objective):
+            language_hint = (
+                "Output language policy: write all explanatory prose in clear Simplified Chinese. "
+                "Keep the required English section headings exactly as provided so validation remains stable, "
+                "but do not write English paragraphs. English is allowed only for proper nouns, model or dataset names, "
+                "formulas, code, paths, and evidence identifiers.\n\n"
+            )
         user_prompt = (
             f"Workflow: {workflow.title}\n"
             f"Command: {task.command}\n"
@@ -2795,6 +2803,7 @@ class ResearchAgentService:
             )
             + write_output_hint
             + checkpoint_hint
+            + language_hint
             + f"Stage instruction:\n{stage.instruction}\n\n"
             + "Required sections:\n"
             + "\n".join(f"- {section}" for section in stage.required_sections)
@@ -2818,7 +2827,8 @@ class ResearchAgentService:
             "additional top-level directories. Use wiki/ for session memory and task notes. Use Content/ only for context, "
             "progress records, checkpoints, prompts, traceability metadata, and manifests. When mentioning output paths in an "
             "artifact, use paths relative to the session root. "
-            f"{CLOUD_DELIVERY_SYSTEM_POLICY}\n\n"
+            + language_hint
+            + f"{CLOUD_DELIVERY_SYSTEM_POLICY}\n\n"
             f"PRD excerpt:\n{prd_context}\n\n"
             f"Tech spec excerpt:\n{tech_context}\n\n"
             f"Relevant ARIS guidance:\n{skill_context}\n"

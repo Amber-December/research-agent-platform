@@ -74,6 +74,15 @@ def _normalize_model_id(model_id: str) -> str:
     return model_id.strip().lower()
 
 
+def _normalize_temperature(model_id: str, temperature: float | None) -> float | None:
+    if temperature is None:
+        return None
+    normalized = _normalize_model_id(model_id)
+    if normalized.startswith("kimi-k2"):
+        return 1.0
+    return temperature
+
+
 def _is_chat_friendly_model(model_id: str) -> bool:
     normalized = _normalize_model_id(model_id)
     if not normalized:
@@ -127,7 +136,13 @@ async def resolve_model(requested_model: str | None = None) -> str:
 
 async def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
     forwarded = dict(payload)
-    forwarded["model"] = await resolve_model(payload.get("model"))
+    selected_model = await resolve_model(payload.get("model"))
+    forwarded["model"] = selected_model
+    if "temperature" in forwarded:
+        forwarded["temperature"] = _normalize_temperature(
+            selected_model,
+            forwarded.get("temperature"),
+        )
     return await _request("POST", "/chat/completions", forwarded)
 
 

@@ -19,6 +19,7 @@ Generate three distinct, testable research ideas from the user's objective, Rese
 6. Do not write a complete experiment plan; provide only falsifiable predictions and planning requirements.
 7. Recommend one candidate using evidence strength, novelty, feasibility, and cost.
 8. If evidence is insufficient, state the uncertainty instead of filling the gap with assumptions.
+9. When the user's objective is Chinese, keep required section headings unchanged but write all explanatory prose in concise Simplified Chinese.
 
 ## Output
 
