@@ -996,6 +996,7 @@ class ResearchAgentService:
             )
         if not content.strip():
             raise RuntimeError(f"Empty content from upstream for stage {stage.name}")
+        content = self._normalize_generated_markdown(content, stage.required_sections)
         evidence_validation: dict | None = None
         if task.command == "/idea" and stage.name == "final_idea":
             content, evidence_validation = self._validate_idea_evidence(task, content)
@@ -1121,6 +1122,10 @@ class ResearchAgentService:
                 support_context_parts.append(wiki_context)
             if task.command == "/wiki":
                 return support_artifacts, "\n\n".join(support_context_parts)
+        if task.command == "/idea" and stage.name in {"idea_verification", "final_idea"}:
+            candidate_lock = self._idea_candidate_lock(task)
+            if candidate_lock:
+                support_context_parts.append(candidate_lock)
         if task.command not in {"/review", "/idea"}:
             return support_artifacts, "\n\n".join(support_context_parts)
         if task.command == "/idea":
@@ -1161,6 +1166,29 @@ class ResearchAgentService:
         support_context_parts.append(bundle.prompt_excerpt())
         return support_artifacts, "\n\n".join(support_context_parts)
 
+    def _idea_candidate_lock(self, task: TaskRun) -> str:
+        candidates = self._artifact_text(task, "idea/IDEA_CANDIDATES.md")
+        recommended = self._markdown_section(candidates, "Recommended Candidate")
+        if not recommended:
+            return ""
+        parts = [
+            "Locked recommended candidate:\n" + recommended,
+            "The critic and finalizer must work on this exact candidate. Do not substitute another candidate.",
+        ]
+        verification = self._artifact_text(task, "idea/IDEA_VERIFICATION.md")
+        verdict = self._markdown_section(verification, "Verification Verdict")
+        if verdict:
+            parts.append("Locked critic verdict:\n" + verdict)
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _markdown_section(content: str, title: str) -> str:
+        match = re.search(
+            rf"(?ms)^##+\s*{re.escape(title)}[^\n]*\n(.*?)(?=^##+\s|\Z)",
+            content,
+        )
+        return match.group(1).strip() if match else ""
+
     async def _prepare_research_wiki_support(
         self,
         task: TaskRun,
@@ -1181,7 +1209,13 @@ class ResearchAgentService:
                     description=f"Wiki PDF copy for {paper.paper_id}.",
                 )
             )
-            evidence_records = collect_paper_evidence(workspace_root, [source_ref], total_limit=14000)
+            evidence_records = collect_paper_evidence(
+                workspace_root,
+                [source_ref],
+                total_limit=18000,
+                query=task.objective,
+                prioritize_research_sections=True,
+            )
             if not wiki_store.summary_exists(paper):
                 generated_summary = await self._generate_wiki_paper_summary(
                     task,
@@ -1227,13 +1261,15 @@ class ResearchAgentService:
         )
         artifacts.append(query_pack_artifact)
 
-        local_context = resolve_local_research_context(workspace_root, task.objective)
         context_parts = ["Research Wiki retrieval context:\n" + query_pack[:9000]]
-        if local_context.context_text:
-            context_parts.append("Local PDF evidence:\n" + local_context.context_text[:9000])
-        if local_context.limitations:
-            context_parts.append("Evidence limitations:\n- " + "\n- ".join(local_context.limitations))
-        return artifacts, "\n\n".join(context_parts), bool(wiki_store.list_papers())
+        has_wiki_papers = bool(wiki_store.list_papers())
+        if not has_wiki_papers:
+            local_context = resolve_local_research_context(workspace_root, task.objective)
+            if local_context.context_text:
+                context_parts.append("Local PDF evidence:\n" + local_context.context_text[:9000])
+            if local_context.limitations:
+                context_parts.append("Evidence limitations:\n- " + "\n- ".join(local_context.limitations))
+        return artifacts, "\n\n".join(context_parts), has_wiki_papers
 
     async def _generate_wiki_paper_summary(
         self,
@@ -1928,7 +1964,7 @@ class ResearchAgentService:
             for part in [
                 "Using the template and the idea artifacts below, fill a focused research contract for handoff to /plan.",
                 "Do not invent an experiment plan; preserve unresolved evidence and planning needs.",
-                "Return markdown only.",
+                "Keep the contract within about 3,000 Chinese characters. Return one markdown document only, without code fences or repeated drafts.",
                 f"Session context:\n{session_context}" if session_context else "",
                 f"Template:\n{template}",
                 f"IDEA_CANDIDATES excerpt:\n{candidates}",
@@ -1942,6 +1978,7 @@ class ResearchAgentService:
             user_prompt=user_prompt,
             temperature=0.2,
         )
+        content = self._normalize_generated_markdown(content, [])
         artifact = self._write_text(
             task,
             "idea/docs/research_contract.md",
@@ -2664,15 +2701,18 @@ class ResearchAgentService:
         ]
         evidence_paths.extend((workspace_root / "wiki" / "papers").glob("*/summary.md"))
         allowed_ids: set[str] = set()
+        evidence_pages: dict[str, int] = {}
         for path in evidence_paths:
             if not path.exists():
                 continue
-            allowed_ids.update(
-                identifier.upper()
-                for identifier in identifier_pattern.findall(
-                    path.read_text(encoding="utf-8", errors="ignore")
-                )
-            )
+            evidence_text = path.read_text(encoding="utf-8", errors="ignore")
+            allowed_ids.update(identifier.upper() for identifier in identifier_pattern.findall(evidence_text))
+            for match in re.finditer(
+                r"(?P<id>PE-[A-F0-9]{10})(?:[^\n\]]{0,40}?)(?:p\.?\s*|第\s*)(?P<page>\d+)(?:\s*页)?",
+                evidence_text,
+                re.I,
+            ):
+                evidence_pages.setdefault(match.group("id").upper(), int(match.group("page")))
         referenced_ids = {
             identifier.upper() for identifier in identifier_pattern.findall(content)
         }
@@ -2685,6 +2725,28 @@ class ResearchAgentService:
                 validated_content,
                 flags=re.I,
             )
+        for evidence_id, page in evidence_pages.items():
+            validated_content = re.sub(
+                rf"\[\s*{re.escape(evidence_id)}\s*\]",
+                f"[{evidence_id}, p.{page}]",
+                validated_content,
+                flags=re.I,
+            )
+        page_linked_ids = sorted(
+            evidence_id
+            for evidence_id in referenced_ids
+            if evidence_id.startswith("PE-")
+            and re.search(
+                rf"{re.escape(evidence_id)}(?:[^\n\]]{{0,30}}?)(?:p\.?\s*\d+|第\s*\d+\s*页)",
+                validated_content,
+                re.I,
+            )
+        )
+        unpaged_ids = sorted(
+            evidence_id
+            for evidence_id in referenced_ids
+            if evidence_id.startswith("PE-") and evidence_id not in page_linked_ids
+        )
         status = "pass"
         if invalid_ids:
             status = "needs_attention"
@@ -2698,12 +2760,35 @@ class ResearchAgentService:
             )
         elif not referenced_ids:
             status = "no_explicit_evidence_ids"
+        elif unpaged_ids:
+            status = "needs_attention"
         return validated_content, {
             "status": status,
             "allowed_ids": sorted(allowed_ids),
             "referenced_ids": sorted(referenced_ids),
             "invalid_ids": invalid_ids,
+            "page_linked_ids": page_linked_ids,
+            "unpaged_ids": unpaged_ids,
         }
+
+    @staticmethod
+    def _normalize_generated_markdown(content: str, required_sections: list[str]) -> str:
+        normalized = content.strip()
+        outer_fence = re.fullmatch(r"```(?:markdown|md)?\s*\n(.*?)\n```", normalized, re.I | re.S)
+        if outer_fence:
+            normalized = outer_fence.group(1).strip()
+        variants = re.split(r"\n```(?:markdown|md)\s*\n(?=#)", normalized, flags=re.I)
+        candidates: list[tuple[int, int, str]] = []
+        for variant in variants:
+            cleaned = re.sub(r"\n```\s*$", "", variant.strip()).strip()
+            section_count = sum(
+                bool(re.search(rf"(?mi)^##+\s*{re.escape(section)}(?:\s|$)", cleaned))
+                for section in required_sections
+            )
+            candidates.append((section_count, -len(cleaned), cleaned))
+        if candidates:
+            normalized = max(candidates)[2]
+        return normalized.rstrip() + "\n"
 
     def _schedule_cloud_sync(self, session_id: str) -> None:
         if not config.cloud_sync_enabled:
@@ -2754,8 +2839,9 @@ class ResearchAgentService:
         self, task: TaskRun, workflow: WorkflowDefinition, stage: StageDefinition, revision_feedback: str
     ) -> dict[str, str]:
         skill_context = self._skill_context(stage.skill_paths)
-        prd_context = self._file_excerpt(config.prd_path, 5000)
-        tech_context = self._file_excerpt(config.tech_spec_path, 5000)
+        lightweight_workflow = task.command in {"/wiki", "/idea"}
+        prd_context = "" if lightweight_workflow else self._file_excerpt(config.prd_path, 5000)
+        tech_context = "" if lightweight_workflow else self._file_excerpt(config.tech_spec_path, 5000)
         session_context = self._session_context_for_task(task)
         prior_artifacts = "\n\n".join(
             f"### {artifact.relative_path}\n{self._artifact_excerpt(task, artifact.relative_path)}"
@@ -2788,6 +2874,22 @@ class ResearchAgentService:
                 "but do not write English paragraphs. English is allowed only for proper nouns, model or dataset names, "
                 "formulas, code, paths, and evidence identifiers.\n\n"
             )
+        artifact_budget_hint = ""
+        if task.command == "/idea":
+            stage_budgets = {
+                "idea_candidates": "3,500",
+                "idea_verification": "2,500",
+                "final_idea": "2,600",
+            }
+            budget = stage_budgets.get(stage.name, "2,600")
+            artifact_budget_hint = (
+                f"Artifact budget: keep the complete artifact within about {budget} Chinese characters. "
+                "Return exactly one Markdown document and never wrap the whole artifact in a code fence. "
+                "Do not repeat prior artifacts. Do not claim 'first', 'state of the art', complete novelty, "
+                "or preservation of the original theory unless the supplied evidence directly proves that claim. "
+                "Every factual or numeric claim must cite an Evidence ID with page, or be labeled 未确认. "
+                "Do not assign symbols, formulas, datasets, or parameter meanings that are absent from the evidence.\n\n"
+            )
         user_prompt = (
             f"Workflow: {workflow.title}\n"
             f"Command: {task.command}\n"
@@ -2804,6 +2906,7 @@ class ResearchAgentService:
             + write_output_hint
             + checkpoint_hint
             + language_hint
+            + artifact_budget_hint
             + f"Stage instruction:\n{stage.instruction}\n\n"
             + "Required sections:\n"
             + "\n".join(f"- {section}" for section in stage.required_sections)
@@ -2813,6 +2916,12 @@ class ResearchAgentService:
             + (f"Recent artifacts:\n{prior_artifacts}\n\n" if prior_artifacts else "")
             + "Return only the markdown for the artifact file. Keep it concrete, honest, and execution-oriented."
         )
+        specification_context = ""
+        if prd_context or tech_context:
+            specification_context = (
+                f"PRD excerpt:\n{prd_context}\n\n"
+                f"Tech spec excerpt:\n{tech_context}\n\n"
+            )
         system_prompt = (
             "You are the orchestration core of a research agent platform. "
             "You must follow the PRD and tech-spec constraints, use the ARIS skill patterns as execution guidance, "
@@ -2829,9 +2938,8 @@ class ResearchAgentService:
             "artifact, use paths relative to the session root. "
             + language_hint
             + f"{CLOUD_DELIVERY_SYSTEM_POLICY}\n\n"
-            f"PRD excerpt:\n{prd_context}\n\n"
-            f"Tech spec excerpt:\n{tech_context}\n\n"
-            f"Relevant ARIS guidance:\n{skill_context}\n"
+            + specification_context
+            + f"Relevant ARIS guidance:\n{skill_context}\n"
         )
         return {"system": system_prompt, "user": user_prompt}
 

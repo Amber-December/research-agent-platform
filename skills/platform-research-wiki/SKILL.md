@@ -19,6 +19,7 @@ Maintain one practical Research Wiki for human reading and Idea retrieval.
 6. Record only minimal, evidence-bearing relationships in `relations.jsonl`.
 7. Preserve failed or rejected Idea information when it can prevent repetition.
 8. Do not claim that a graph database, external Wiki helper, MCP tool, or independent reviewer was used unless the runtime actually used it.
+9. Prioritize evidence from Discussion, Limitations, Conclusion, Future Work, ablations, and explicit failure observations instead of reading only the first pages.
 
 ## Output
 

@@ -10,6 +10,7 @@ from research_agent_platform import agent as agent_module
 from research_agent_platform import upstream as upstream_module
 from research_agent_platform.agent import ResearchAgentService
 from research_agent_platform.config import config
+from research_agent_platform.memory.store import ResearchWikiStore
 
 
 def _write_test_pdf(path: Path, text: str = "Graph neural network limitation and future work") -> None:
@@ -90,12 +91,14 @@ def test_idea_routes_each_stage_to_configured_model(
     monkeypatch.setattr(config, "idea_final_model", "final-model")
     stage_models: dict[str, str | None] = {}
     stage_system_prompts: list[str] = []
+    stage_user_prompts: dict[str, str] = {}
 
     async def capture_models(*, system_prompt, user_prompt, model=None, temperature=0.3):
         for stage_name in ("Idea Candidates", "Idea Verification", "Final Idea"):
             if f"Current stage: {stage_name}" in user_prompt:
                 stage_models[stage_name] = model
                 stage_system_prompts.append(system_prompt)
+                stage_user_prompts[stage_name] = user_prompt
         return _stage_markdown(user_prompt)
 
     monkeypatch.setattr(agent_module, "generate_text", capture_models)
@@ -109,6 +112,10 @@ def test_idea_routes_each_stage_to_configured_model(
     }
     assert len(stage_system_prompts) == 3
     assert all("Simplified Chinese" in prompt for prompt in stage_system_prompts)
+    assert all("PRD excerpt" not in prompt for prompt in stage_system_prompts)
+    assert "Locked recommended candidate" in stage_user_prompts["Idea Verification"]
+    assert "Locked recommended candidate" in stage_user_prompts["Final Idea"]
+    assert "The critic and finalizer must work on this exact candidate" in stage_user_prompts["Final Idea"]
     task = service.get_task(result["task_id"])
     trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
     assert [stage["model_role"] for stage in trace["stages"]] == [
@@ -139,6 +146,24 @@ def test_kimi_k2_temperature_is_normalized(monkeypatch):
     assert result["choices"][0]["message"]["content"] == "ok"
     assert captured_payload["model"] == "Kimi-K2.6"
     assert captured_payload["temperature"] == 1.0
+
+
+def test_generated_markdown_keeps_one_complete_document():
+    duplicated = (
+        "# Final\n\n## Problem Anchor\nShort.\n\n## Method Thesis\nShort.\n"
+        "\n```markdown\n# Final Again\n\n## Problem Anchor\n"
+        + ("Long. " * 100)
+        + "\n\n## Method Thesis\nLong.\n```"
+    )
+
+    normalized = ResearchAgentService._normalize_generated_markdown(
+        duplicated,
+        ["Problem Anchor", "Method Thesis"],
+    )
+
+    assert normalized.count("## Problem Anchor") == 1
+    assert "Final Again" not in normalized
+    assert "```markdown" not in normalized
 
 
 def test_idea_stage_model_falls_back_to_upstream_model(
@@ -187,6 +212,49 @@ def test_final_idea_marks_unknown_evidence_ids(
     assert result["status"] == "completed"
     assert "UNVERIFIED(P999)" in final_idea
     assert trace["evidence_validation"]["invalid_ids"] == ["P999"]
+
+
+def test_final_idea_adds_known_evidence_page(service: ResearchAgentService, monkeypatch):
+    session = service.store.create_session()
+    evidence_map = Path(session.workspace_root, "bib", "EVIDENCE_MAP.md")
+    evidence_map.parent.mkdir(parents=True, exist_ok=True)
+    evidence_map.write_text("# Evidence Map\n\n- [PE-ABCDEF1234, p.8] future work.\n", encoding="utf-8")
+
+    async def generate_with_page(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        content = _stage_markdown(user_prompt)
+        if "Current stage: Final Idea" in user_prompt:
+            content = content.replace("available Wiki evidence", "[PE-ABCDEF1234]")
+        return content
+
+    monkeypatch.setattr(agent_module, "generate_text", generate_with_page)
+    result = asyncio.run(service.chat(session.session_id, "/idea 基于现有证据生成方向"))
+    task = service.get_task(result["task_id"])
+    final_idea = Path(task.artifact_root, "idea", "FINAL_IDEA.md").read_text(encoding="utf-8")
+    trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
+
+    assert "[PE-ABCDEF1234, p.8]" in final_idea
+    assert trace["evidence_validation"]["page_linked_ids"] == ["PE-ABCDEF1234"]
+    assert trace["evidence_validation"]["unpaged_ids"] == []
+
+
+def test_wiki_query_pack_prioritizes_gap_sections(tmp_path: Path):
+    summary = Path(tmp_path, "wiki", "papers", "P-ABCDEF123456", "summary.md")
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        "# Example Paper\n\n"
+        "## 基本信息\n\n- 原始文件: `paper/uploads/example.pdf`\n\n"
+        "## 核心方法\n\n" + ("方法背景。" * 500) + "\n\n"
+        "## 作者讨论与局限\n\n- 作者明确指出现有方法在深层训练时不稳定。[PE-1111111111, p.7]\n\n"
+        "## 作者提出的未来工作\n\n- 作者建议未来结合注意力机制。[PE-2222222222, p.8]\n\n"
+        "## 对 Idea 生成的提示\n\n- 优先验证作者明确提出的注意力方向。\n",
+        encoding="utf-8",
+    )
+
+    query_pack = ResearchWikiStore(tmp_path).query_pack("研究 Gap future work", character_limit=1800)
+
+    assert "作者提出的未来工作" in query_pack
+    assert "PE-2222222222" in query_pack
+    assert "作者讨论与局限" in query_pack
 
 
 def test_idea_auto_ingests_uploaded_pdf_and_writes_back_to_wiki(

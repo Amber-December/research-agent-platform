@@ -61,7 +61,13 @@ def resolve_local_research_context(
             limitations=["No local PDF or review evidence was found."],
         )
 
-    evidence_records = collect_paper_evidence(root, source_refs, total_limit=total_limit)
+    evidence_records = collect_paper_evidence(
+        root,
+        source_refs,
+        total_limit=total_limit,
+        query=objective,
+        prioritize_research_sections=True,
+    )
     limitations: list[str] = []
     if not evidence_records:
         limitations.append("Local PDFs were found, but no extractable text evidence was available.")

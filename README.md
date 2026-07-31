@@ -149,5 +149,6 @@ Set `ARIS_REPO_ROOT` in `.env` only if you intentionally want to override the bu
 - If your relay exposes many model ids, set `UPSTREAM_MODEL` explicitly.
 - If `UPSTREAM_MODEL` is empty, the platform now prefers chat-capable models such as `gpt-5.4-mini` instead of taking the first returned model blindly.
 - `IDEA_GENERATOR_MODEL`, `IDEA_CRITIC_MODEL`, and `IDEA_FINAL_MODEL` optionally route the three `/idea` stages to different models. Empty role settings fall back to `UPSTREAM_MODEL`, so one-model deployments require no additional configuration.
+- A practical fast-quality profile is `GLM-5.2 -> DeepSeek-V4-Pro -> GLM-5.2` after confirming those names in the provider's `/v1/models` response. `Kimi-K2.6` can be used for deeper candidate generation, but real tests showed substantially higher and more variable latency.
 - If a configured Idea-stage model fails and `UPSTREAM_MODEL` is available, the stage retries once with the default model and records the fallback in `Content/IDEA_TRACE.json`.
 - `/fig` uses `IMAGE_MODEL`, which defaults to `gpt-image-2`.

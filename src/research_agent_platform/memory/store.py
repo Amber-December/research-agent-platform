@@ -133,6 +133,10 @@ class ResearchWikiStore:
             ranked.append((score, paper, summary))
         ranked.sort(key=lambda item: (-item[0], item[1].paper_id))
         selected = ranked[:limit]
+        per_paper_limit = max(
+            1400,
+            min(5000, (character_limit - 900) // max(1, len(selected))),
+        )
         lines = [
             "# Wiki Query Pack",
             "",
@@ -144,7 +148,7 @@ class ResearchWikiStore:
             lines.extend(["## Evidence Limitations", "", "- Wiki 中暂无可用论文。"])
             return "\n".join(lines) + "\n"
         for score, paper, summary in selected:
-            excerpt = summary[:1400].rstrip()
+            excerpt = self._summary_excerpt(summary, query_terms, per_paper_limit)
             paper_block = [
                 f"## {paper.paper_id}: {paper.title}",
                 "",
@@ -168,6 +172,42 @@ class ResearchWikiStore:
             ]
         )
         return ("\n".join(lines) + "\n")[:character_limit]
+
+    @staticmethod
+    def _summary_excerpt(summary: str, query_terms: list[str], limit: int) -> str:
+        matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", summary))
+        if not matches:
+            return summary[:limit].rstrip()
+        priorities = {
+            "作者讨论与局限": 140,
+            "作者提出的未来工作": 140,
+            "对 idea 生成的提示": 130,
+            "可复用证据": 120,
+            "研究问题": 110,
+            "核心方法": 100,
+            "主要结果": 80,
+            "数据集与实验设置": 60,
+            "基本信息": 20,
+        }
+        sections: list[tuple[int, int, str]] = []
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(summary)
+            block = summary[match.start() : end].strip()
+            title = match.group(1).strip()
+            normalized = block.casefold()
+            score = priorities.get(title.casefold(), priorities.get(title, 30))
+            score += sum(5 * normalized.count(term.casefold()) for term in query_terms)
+            sections.append((score, -index, block))
+        selected: list[str] = []
+        used = 0
+        for _, _, block in sorted(sections, reverse=True):
+            if selected and used + len(block) + 2 > limit:
+                continue
+            selected.append(block)
+            used += len(block) + 2
+            if used >= limit:
+                break
+        return "\n\n".join(selected)[:limit].rstrip()
 
     def list_papers(self) -> list[WikiPaper]:
         papers: list[WikiPaper] = []
