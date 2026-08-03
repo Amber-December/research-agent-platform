@@ -1184,7 +1184,7 @@ class ResearchAgentService:
     @staticmethod
     def _markdown_section(content: str, title: str) -> str:
         match = re.search(
-            rf"(?ms)^##+\s*{re.escape(title)}[^\n]*\n(.*?)(?=^##+\s|\Z)",
+            rf"(?ms)^#{{1,6}}\s*{re.escape(title)}[^\n]*\n(.*?)(?=^#{{1,6}}\s|\Z)",
             content,
         )
         return match.group(1).strip() if match else ""
@@ -2843,10 +2843,17 @@ class ResearchAgentService:
         prd_context = "" if lightweight_workflow else self._file_excerpt(config.prd_path, 5000)
         tech_context = "" if lightweight_workflow else self._file_excerpt(config.tech_spec_path, 5000)
         session_context = self._session_context_for_task(task)
-        prior_artifacts = "\n\n".join(
-            f"### {artifact.relative_path}\n{self._artifact_excerpt(task, artifact.relative_path)}"
-            for artifact in task.artifacts[-4:]
-        )
+        prior_artifact_sections: list[str] = []
+        for artifact in reversed(task.artifacts):
+            if not self._is_prompt_text_artifact(artifact.relative_path):
+                continue
+            excerpt = self._artifact_excerpt(task, artifact.relative_path)
+            if not excerpt:
+                continue
+            prior_artifact_sections.append(f"### {artifact.relative_path}\n{excerpt}")
+            if len(prior_artifact_sections) == 4:
+                break
+        prior_artifacts = "\n\n".join(reversed(prior_artifact_sections))
         write_output_hint = ""
         if task.command == "/write":
             write_output_hint = (
@@ -2870,7 +2877,7 @@ class ResearchAgentService:
         if re.search(r"[\u4e00-\u9fff]", task.objective):
             language_hint = (
                 "Output language policy: write all explanatory prose in clear Simplified Chinese. "
-                "Keep the required English section headings exactly as provided so validation remains stable, "
+                "Keep the required section headings exactly as provided so validation remains stable, "
                 "but do not write English paragraphs. English is allowed only for proper nouns, model or dataset names, "
                 "formulas, code, paths, and evidence identifiers.\n\n"
             )
@@ -2879,7 +2886,7 @@ class ResearchAgentService:
             stage_budgets = {
                 "idea_candidates": "3,500",
                 "idea_verification": "2,500",
-                "final_idea": "2,600",
+                "final_idea": "4,800",
             }
             budget = stage_budgets.get(stage.name, "2,600")
             artifact_budget_hint = (
@@ -2889,6 +2896,22 @@ class ResearchAgentService:
                 "or preservation of the original theory unless the supplied evidence directly proves that claim. "
                 "Every factual or numeric claim must cite an Evidence ID with page, or be labeled 未确认. "
                 "Do not assign symbols, formulas, datasets, or parameter meanings that are absent from the evidence.\n\n"
+            )
+        final_idea_writing_hint = ""
+        if task.command == "/idea" and stage.name == "final_idea":
+            final_idea_writing_hint = (
+                "Final Idea reader profile: the document will be read by strong graduate and doctoral researchers who need "
+                "to understand the idea quickly and judge whether it is worth developing. Write professionally but do not use "
+                "dense slogan-like phrases. Use the exact Chinese headings below. Start each section with a direct conclusion, "
+                "then explain the reasoning in plain academic Chinese. The first section must contain a one-sentence Idea and "
+                "a short plain-language explanation. The gap section must say whether the gap is author-explicit or an "
+                "evidence-backed inference. The method section must explain the mechanism, why it may work, and which parts are "
+                "still assumptions. The innovation section must keep one dominant contribution and avoid a shopping list. The "
+                "evidence section should map key claims to Evidence IDs and page numbers. The risk section must include the "
+                "strongest plausible rejection argument and the condition under which the idea should be abandoned. Use short "
+                "paragraphs, bullets, or a small table only when they improve readability. Do not repeat the Wiki summary or "
+                "write a full experiment plan. Use only the nine required Chinese sections after the title. Do not mention "
+                "skills, prompts, agents, execution metadata, or add a separate plain-language summary after the last section.\n\n"
             )
         user_prompt = (
             f"Workflow: {workflow.title}\n"
@@ -2907,6 +2930,7 @@ class ResearchAgentService:
             + checkpoint_hint
             + language_hint
             + artifact_budget_hint
+            + final_idea_writing_hint
             + f"Stage instruction:\n{stage.instruction}\n\n"
             + "Required sections:\n"
             + "\n".join(f"- {section}" for section in stage.required_sections)
@@ -3350,10 +3374,30 @@ class ResearchAgentService:
         return file_path.read_text(encoding="utf-8", errors="ignore")[:limit]
 
     def _artifact_excerpt(self, task: TaskRun, relative_path: str) -> str:
+        if not self._is_prompt_text_artifact(relative_path):
+            return ""
         target = self._artifact_path(task, relative_path)
         if not target.exists():
             return ""
         return target.read_text(encoding="utf-8", errors="ignore")[:4000]
+
+    @staticmethod
+    def _is_prompt_text_artifact(relative_path: str) -> bool:
+        return Path(relative_path).suffix.lower() in {
+            ".bib",
+            ".csv",
+            ".enw",
+            ".json",
+            ".jsonl",
+            ".md",
+            ".nbib",
+            ".ris",
+            ".tex",
+            ".tsv",
+            ".txt",
+            ".yaml",
+            ".yml",
+        }
 
     def _artifact_text(self, task: TaskRun, relative_path: str) -> str:
         target = self._artifact_path(task, relative_path)

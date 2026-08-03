@@ -180,21 +180,25 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     name="final_idea",
                     title="Final Idea",
                     instruction=(
-                        "Consolidate the chosen candidate and verification findings into a concise final research idea that can "
-                        "be handed to /plan. Preserve evidence caveats, define the problem anchor, method thesis, dominant "
-                        "contribution, falsifiable prediction, scope boundary, and unresolved risks."
+                        "Consolidate the locked candidate and verification findings into a professional, readable Chinese "
+                        "research Idea for graduate and doctoral researchers. Explain why the problem matters, what the closest "
+                        "evidence-backed gap is, how the proposed mechanism addresses it, what the dominant contribution is, and "
+                        "how the idea could be falsified. Keep facts, evidence-backed inference, and unverified assumptions "
+                        "clearly separated. Preserve evidence caveats and hand only high-level validation requirements to /plan "
+                        "instead of drafting a complete experiment plan."
                     ),
                     artifact_path="idea/FINAL_IDEA.md",
                     artifact_kind="report",
                     required_sections=[
-                        "Problem Anchor",
-                        "Method Thesis",
-                        "Dominant Contribution",
-                        "Falsifiable Prediction",
-                        "Evidence Basis",
-                        "Scope Boundary",
-                        "Open Risks",
-                        "Handoff to Plan",
+                        "一句话研究 Idea",
+                        "研究背景与核心问题",
+                        "现有研究不足与可切入空白",
+                        "核心假设与方法思路",
+                        "预期创新与学术价值",
+                        "可证伪预测",
+                        "证据依据",
+                        "适用边界、风险与不确定性",
+                        "交给实验方案模块的下一步",
                     ],
                     skill_paths=_skills(
                         "platform-idea-finalization",

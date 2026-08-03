@@ -24,36 +24,37 @@ def _stage_markdown(user_prompt: str, *, invalid_reference: bool = False) -> str
     if "Current stage: Idea Candidates" in user_prompt:
         return (
             "# Idea Candidates\n\n"
-            "## Problem Frame\n- Topic.\n\n"
-            "## Candidate Ideas\n- A\n- B\n- C\n\n"
-            "## Comparative Assessment\n- A best.\n\n"
-            "## Recommended Candidate\n- A\n\n"
-            "## Risks and Unknowns\n- Evidence coverage.\n\n"
-            "## Decision Required\nNone."
+            "# Problem Frame\n- Topic.\n\n"
+            "# Candidate Ideas\n- A\n- B\n- C\n\n"
+            "# Comparative Assessment\n- A best.\n\n"
+            "# Recommended Candidate\n- A\n\n"
+            "# Risks and Unknowns\n- Evidence coverage.\n\n"
+            "# Decision Required\nNone."
         )
     if "Current stage: Idea Verification" in user_prompt:
         return (
             "# Idea Verification\n\n"
-            "## Candidate Under Review\n- A\n\n"
-            "## Closest Prior Work\n- Prior work.\n\n"
-            "## Novelty Stress Test\n- Narrow the claim.\n\n"
-            "## Feasibility Stress Test\n- Feasible.\n\n"
-            "## Disconfirming Evidence\n- None confirmed.\n\n"
-            "## Unresolved Questions\n- Data coverage.\n\n"
-            "## Verification Verdict\n- Keep with caveats."
+            "# Candidate Under Review\n- A\n\n"
+            "# Closest Prior Work\n- Prior work.\n\n"
+            "# Novelty Stress Test\n- Narrow the claim.\n\n"
+            "# Feasibility Stress Test\n- Feasible.\n\n"
+            "# Disconfirming Evidence\n- None confirmed.\n\n"
+            "# Unresolved Questions\n- Data coverage.\n\n"
+            "# Verification Verdict\n- Keep with caveats."
         )
     if "Current stage: Final Idea" in user_prompt:
         evidence = "[P001] and [P999]" if invalid_reference else "available Wiki evidence"
         return (
-            "# Final Idea\n\n"
-            "## Problem Anchor\n- Topic.\n\n"
-            "## Method Thesis\n- A.\n\n"
-            "## Dominant Contribution\n- B.\n\n"
-            f"## Falsifiable Prediction\n- C based on {evidence}.\n\n"
-            "## Evidence Basis\n- Current evidence.\n\n"
-            "## Scope Boundary\n- E.\n\n"
-            "## Open Risks\n- F.\n\n"
-            "## Handoff to Plan\n- Ready."
+            "# 最终研究 Idea：示例方向\n\n"
+            "## 一句话研究 Idea\n- 用一个最小机制解决目标问题。\n\n"
+            "## 研究背景与核心问题\n- Topic.\n\n"
+            "## 现有研究不足与可切入空白\n- Gap.\n\n"
+            "## 核心假设与方法思路\n- A.\n\n"
+            "## 预期创新与学术价值\n- B.\n\n"
+            f"## 可证伪预测\n- C based on {evidence}.\n\n"
+            "## 证据依据\n- Current evidence.\n\n"
+            "## 适用边界、风险与不确定性\n- F.\n\n"
+            "## 交给实验方案模块的下一步\n- Ready."
         )
     if "Using the template and the idea artifacts" in user_prompt:
         return "# Research Contract\n\n- Ready for /plan."
@@ -86,11 +87,13 @@ def test_idea_routes_each_stage_to_configured_model(
     service: ResearchAgentService,
     monkeypatch,
 ):
+    monkeypatch.setattr(config, "aris_repo_root", str(Path(__file__).resolve().parents[1]))
     monkeypatch.setattr(config, "idea_generator_model", "generator-model")
     monkeypatch.setattr(config, "idea_critic_model", "critic-model")
     monkeypatch.setattr(config, "idea_final_model", "final-model")
     stage_models: dict[str, str | None] = {}
     stage_system_prompts: list[str] = []
+    stage_system_prompts_by_name: dict[str, str] = {}
     stage_user_prompts: dict[str, str] = {}
 
     async def capture_models(*, system_prompt, user_prompt, model=None, temperature=0.3):
@@ -98,11 +101,15 @@ def test_idea_routes_each_stage_to_configured_model(
             if f"Current stage: {stage_name}" in user_prompt:
                 stage_models[stage_name] = model
                 stage_system_prompts.append(system_prompt)
+                stage_system_prompts_by_name[stage_name] = system_prompt
                 stage_user_prompts[stage_name] = user_prompt
         return _stage_markdown(user_prompt)
 
     monkeypatch.setattr(agent_module, "generate_text", capture_models)
-    result = asyncio.run(service.chat(None, "/idea 生成一个 GNN 研究方向"))
+    session = service.store.create_session()
+    source_pdf = Path(session.workspace_root, "paper", "uploads", "prompt-safety.pdf")
+    _write_test_pdf(source_pdf)
+    result = asyncio.run(service.chat(session.session_id, "/idea 生成一个 GNN 研究方向"))
 
     assert result["status"] == "completed"
     assert stage_models == {
@@ -116,7 +123,19 @@ def test_idea_routes_each_stage_to_configured_model(
     assert "Locked recommended candidate" in stage_user_prompts["Idea Verification"]
     assert "Locked recommended candidate" in stage_user_prompts["Final Idea"]
     assert "The critic and finalizer must work on this exact candidate" in stage_user_prompts["Final Idea"]
+    assert "Locked critic verdict" in stage_user_prompts["Final Idea"]
+    assert all("%PDF-" not in prompt for prompt in stage_user_prompts.values())
+    assert "strong graduate and doctoral researchers" in stage_user_prompts["Final Idea"]
+    assert "## 一句话研究 Idea" not in stage_user_prompts["Final Idea"]
+    assert "- 一句话研究 Idea" in stage_user_prompts["Final Idea"]
+    assert "strongest plausible rejection argument" in stage_user_prompts["Final Idea"]
+    assert "交给实验方案模块的下一步" in stage_system_prompts_by_name["Final Idea"]
     task = service.get_task(result["task_id"])
+    final_idea = Path(task.artifact_root, "idea", "FINAL_IDEA.md").read_text(encoding="utf-8")
+    assert "## 一句话研究 Idea" in final_idea
+    assert "## 现有研究不足与可切入空白" in final_idea
+    assert "## 适用边界、风险与不确定性" in final_idea
+    assert "## Problem Anchor" not in final_idea
     trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
     assert [stage["model_role"] for stage in trace["stages"]] == [
         "idea_generator",

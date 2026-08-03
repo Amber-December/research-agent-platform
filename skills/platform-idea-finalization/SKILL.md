@@ -1,33 +1,40 @@
 ---
 name: platform-idea-finalization
-description: Consolidate an idea candidate and critique into a concise, evidence-linked final research idea.
+description: Consolidate an idea candidate and critique into a professional, readable, evidence-linked Chinese research idea.
 ---
 
 # Final Idea Consolidation
 
 ## Goal
 
-Produce one concise final Idea that can be handed to `/plan` without repeating the full planning workflow.
+Produce a professional, readable final Idea for graduate and doctoral researchers. It must be understandable to a new group member, rigorous enough for discussion, and ready for `/plan` without becoming a full experiment plan.
+
+Reuse only these writing principles, without adding stages: `research-refine` for a fixed problem and minimal mechanism; `research-review` for claim-evidence alignment; `invention-structuring` for problem-solution-value logic; `kill-argument` for the strongest rejection.
 
 ## Rules
 
-1. Preserve valid criticism and unresolved uncertainty.
-2. Keep one dominant contribution instead of combining unrelated innovations.
-3. Define a concrete problem anchor, method thesis, and falsifiable prediction.
-4. Cite only supplied paper IDs and Evidence IDs.
-5. Mark unsupported details as uncertain or as requirements for `/plan`.
-6. Include scope boundaries and open risks.
-7. Do not draft patent claims or invention-disclosure language.
-8. Do not invent a complete experiment plan.
-9. When the user's objective is Chinese, keep required section headings unchanged but write all explanatory prose in concise Simplified Chinese.
-10. Start the Problem Anchor with one plain-Chinese sentence summarizing the final Idea.
-11. Cite Evidence IDs with page numbers when available, and clearly label whether the gap is author-explicit or an evidence-backed model inference.
-12. Keep implementation choices and exact experiment settings out of the final Idea unless the evidence requires them; hand them to `/plan` instead.
-13. Never claim “first”, complete novelty, state of the art, universal compatibility, or preserved theoretical guarantees without direct supporting evidence.
-14. Return one concise final document only; do not repeat an earlier draft or wrap the entire artifact in a code fence.
-15. Preserve the locked recommended candidate and critic verdict; do not merge in or switch to a different candidate.
-16. Do not invent parameter symbols or formulas when the supplied evidence does not define them exactly.
+1. Preserve the locked candidate, critic verdict, criticism, and uncertainty; never switch ideas.
+2. Explain: important problem -> evidence-backed gap -> hypothesis -> minimal mechanism -> value -> falsifiable outcome.
+3. Keep one dominant contribution, not a feature list.
+4. Cite only supplied IDs. Separate paper facts, grounded inference, and unverified assumptions.
+5. Say whether the gap is author-explicit or inferred. Never claim first, full novelty, SOTA, universal compatibility, or preserved theory without proof.
+6. Write clear Simplified Chinese. Start with one sentence and a short plain-language explanation. Explain why the mechanism may work.
+7. Do not invent formulas, symbols, datasets, metrics, hyperparameters, results, or frameworks absent from evidence. Leave implementation and full experiments to `/plan`.
+8. Include scope, strongest rejection, unresolved risks, and an abandon-or-revise condition.
+9. Return one complete Markdown document only; no repeated draft or outer code fence.
+10. After the title, use only the nine required Chinese sections. Do not mention skills, prompts, agents, execution metadata, or append a separate `白话总结`.
 
-## Output
+## Output Shape
 
-Return the exact final Idea sections requested by the workflow and file-ready Markdown only.
+Use this exact title and order:
+
+1. `# 最终研究 Idea：<具体、克制、可讨论的中文标题>`
+2. `## 一句话研究 Idea`
+3. `## 研究背景与核心问题`
+4. `## 现有研究不足与可切入空白`
+5. `## 核心假设与方法思路`
+6. `## 预期创新与学术价值`
+7. `## 可证伪预测`
+8. `## 证据依据`
+9. `## 适用边界、风险与不确定性`
+10. `## 交给实验方案模块的下一步`
