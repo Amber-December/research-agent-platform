@@ -43,6 +43,8 @@ uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-di
 - `/plan` turns `FINAL_IDEA` or a directly supplied research objective into `plan/RESEARCH_BLUEPRINT.md`, `plan/EXPERIMENT_PLAN.md`, and `plan/EXECUTION_CHECKLIST.md`.
 - `/write` freezes an attachment/session/workspace SourceSet, extracts stable evidence IDs, plans and drafts the paper, runs an independent self-review, produces an evidence-preserving revision, and writes deterministic citation/delivery reports before DOCX/PDF/TeX export.
 - `/rebuttal` requires both a completed paper and reviewer comments. It maps each comment to paper evidence, drafts point-by-point replies, produces a revised manuscript and revision ledger, then verifies comment-ID coverage in `REBUTTAL_CLOSURE_REPORT.json`.
+- `/peer-review` runs a deterministic, structured simulated peer review over an uploaded or generated Markdown, TXT, or LaTeX manuscript. It writes `rebuttal/reviews/REVIEW_PACKAGE.json`; it is advisory and is not a journal decision.
+- `/final-check` runs deterministic pre-submission checks for manuscript presence, citation-key resolution, unresolved placeholders, and LaTeX cross-reference closure. It writes `paper/FINAL_GATE_REPORT.json` with `PASS`, `REVISE`, or `BLOCK`.
 - `/code`, `/fig`, `/present`, and `/wiki` continue implementation planning, figure production, presentation generation, and persistent research memory.
 
 Each command can run independently. When prior `/review` or `/idea` tasks exist in the same session, downstream commands prioritize their evidence map, research gaps, final idea, and research contract as handoff context.

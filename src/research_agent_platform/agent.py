@@ -45,6 +45,7 @@ from .paper_pipeline import (
     resolve_write_source_config,
     select_venue_profile,
 )
+from .publication_quality import build_final_gate_report, build_review_package, build_revision_audit, build_writing_context, find_manuscript, to_markdown
 from .presentation import (
     SlideRender,
     assemble_mixed_deck,
@@ -916,6 +917,32 @@ class ResearchAgentService:
         support_artifacts, support_context = await self._prepare_stage_support(task, stage)
         for artifact in support_artifacts:
             task.artifacts.append(artifact)
+        if task.command in {"/peer-review", "/final-check"}:
+            manuscript_path, manuscript = find_manuscript(Path(task.artifact_root))
+            payload = (
+                build_review_package(manuscript_path, manuscript)
+                if task.command == "/peer-review"
+                else build_final_gate_report(manuscript_path, manuscript, Path(task.artifact_root))
+            )
+            title = "Simulated Peer Review Package" if task.command == "/peer-review" else "Pre-submission Final Gate Report"
+            artifact = self._write_text(
+                task,
+                stage.artifact_path,
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                kind=stage.artifact_kind,
+                description=title,
+            )
+            task.artifacts.append(
+                self._write_text(
+                    task,
+                    stage.artifact_path.replace(".json", ".md"),
+                    to_markdown(title, payload),
+                    kind="report",
+                    description=f"Human-readable {title.lower()}.",
+                )
+            )
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
         if task.command == "/rebuttal" and stage.name == "rebuttal_intake":
             if task.rebuttal_source is None:
                 raise RebuttalInputError("/rebuttal input SourceSet is missing.")
@@ -1722,6 +1749,17 @@ class ResearchAgentService:
             + ("\n".join(f"- `{path}`" for path in source_config.source_refs) or "- None")
             + "\n\nEvidence records:\n"
             + (paper_evidence_prompt(records) or "No readable evidence was extracted; keep all unsupported sections explicit.")
+        )
+        context_payload = build_writing_context(task.objective, list(source_config.source_refs), venue_profile)
+        context_payload["evidence_ids"] = [record["evidence_id"] for record in records]
+        artifacts.append(
+            self._write_text(
+                task,
+                "Content/WRITING_CONTEXT.json",
+                json.dumps(context_payload, ensure_ascii=False, indent=2),
+                kind="manifest",
+                description="Structured writing context and evidence boundary.",
+            )
         )
         return artifacts, context
 
@@ -2688,6 +2726,17 @@ class ResearchAgentService:
                 description="Deterministic paper structure, evidence, citation, and compile delivery gate.",
             )
         )
+        original = self._artifact_text(task, "paper/PAPER_DRAFT.md")
+        if original and manuscript:
+            artifacts.append(
+                self._write_text(
+                    task,
+                    "paper/REVISION_AUDIT.json",
+                    json.dumps(build_revision_audit(original, manuscript), ensure_ascii=False, indent=2),
+                    kind="review",
+                    description="Deterministic revision preservation audit.",
+                )
+            )
         return artifacts
 
     def _write_rebuttal_delivery_artifacts(self, task: TaskRun) -> list:
@@ -2956,4 +3005,3 @@ class ResearchAgentService:
             if stripped.startswith(token):
                 return stripped[len(token) :].strip() or stripped
         return stripped
-

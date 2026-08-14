@@ -30,6 +30,36 @@ def _skills(*names: str) -> list[str]:
 
 def workflow_registry() -> dict[str, WorkflowDefinition]:
     return {
+        "/peer-review": WorkflowDefinition(
+            command="/peer-review",
+            title="Simulated Peer Review Workflow",
+            description="Produce a deterministic, structured simulated peer-review package for an uploaded or generated manuscript.",
+            stage_definitions=[
+                StageDefinition(
+                    name="simulated_peer_review",
+                    title="Simulated Peer Review",
+                    instruction="This stage is generated deterministically by the platform.",
+                    artifact_path="rebuttal/reviews/REVIEW_PACKAGE.json",
+                    artifact_kind="review",
+                    required_sections=["Decision", "Findings", "Limitations"],
+                )
+            ],
+        ),
+        "/final-check": WorkflowDefinition(
+            command="/final-check",
+            title="Pre-submission Final Check Workflow",
+            description="Run deterministic manuscript, bibliography, placeholder, and LaTeX cross-reference checks.",
+            stage_definitions=[
+                StageDefinition(
+                    name="final_check",
+                    title="Pre-submission Final Check",
+                    instruction="This stage is generated deterministically by the platform.",
+                    artifact_path="paper/FINAL_GATE_REPORT.json",
+                    artifact_kind="review",
+                    required_sections=["Decision", "Checks"],
+                )
+            ],
+        ),
         "/plan": WorkflowDefinition(
             command="/plan",
             title="Research Planning Workflow",

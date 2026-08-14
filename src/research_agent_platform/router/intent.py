@@ -43,6 +43,8 @@ COMMAND_DESCRIPTIONS = {
     "/code": "turn the chosen plan into implementation and experiment execution materials",
     "/fig": "generate precise research charts from data or scientific illustrations with gpt-image-2",
     "/write": "create paper outlines, narrative reports, and draft sections",
+    "/peer-review": "run a structured simulated peer review of a completed manuscript",
+    "/final-check": "run deterministic pre-submission checks on a manuscript and bibliography",
     "/rebuttal": "analyze peer-review comments and produce rebuttal and revision materials",
     "/present": "prepare slides, poster, talk track, and Q&A materials",
     "/wiki": "update persistent research memory and reusable knowledge notes",
@@ -85,6 +87,8 @@ HEURISTICS = {
     "/code": ["experiment", "implement", "code", "reproduce", "run", "实验", "实现", "复现"],
     "/fig": ["figure", "plot", "diagram", "chart", "图", "图表", "流程图"],
     "/write": ["paper", "draft", "write", "manuscript", "论文", "写作", "草稿"],
+    "/peer-review": ["simulate review", "peer review", "paper review", "模拟审稿", "投稿前审稿"],
+    "/final-check": ["final check", "submission check", "投稿前检查", "终检"],
     "/rebuttal": [
         "rebuttal",
         "reviewer comments",
