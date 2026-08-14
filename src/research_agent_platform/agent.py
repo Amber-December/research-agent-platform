@@ -46,6 +46,7 @@ from .paper_pipeline import (
     select_venue_profile,
 )
 from .publication_quality import build_final_gate_report, build_review_package, build_revision_audit, build_writing_context, find_manuscript, to_markdown
+from .evaluation import write_evaluation_report
 from .presentation import (
     SlideRender,
     assemble_mixed_deck,
@@ -941,6 +942,20 @@ class ResearchAgentService:
                     description=f"Human-readable {title.lower()}.",
                 )
             )
+            if task.command == "/final-check":
+                review_path = Path(task.artifact_root) / "rebuttal/reviews/REVIEW_PACKAGE.json"
+                if review_path.exists():
+                    review_payload = json.loads(review_path.read_text(encoding="utf-8"))
+                    evaluation_path = write_evaluation_report(Path(task.artifact_root), review_payload, payload, manuscript)
+                    task.artifacts.append(
+                        self._write_text(
+                            task,
+                            evaluation_path.relative_to(task.artifact_root).as_posix(),
+                            evaluation_path.read_text(encoding="utf-8"),
+                            kind="review",
+                            description="Deterministic writing-quality rubric evaluation.",
+                        )
+                    )
             self.artifacts._write_manifest_for_root(Path(task.artifact_root))
             return artifact
         if task.command == "/rebuttal" and stage.name == "rebuttal_intake":
