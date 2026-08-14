@@ -53,3 +53,23 @@ def test_adversarial_manuscript_is_not_scored_as_strong():
 
     assert result["total_score"] < 70
     assert result["band"] == "needs_iteration"
+
+
+def test_author_year_closure_violation_reduces_citation_score():
+    result = evaluate_review_package(
+        {"findings": [], "limitations": ["automated"]},
+        "## Abstract\nText (Jones, 2024).",
+        {
+            "decision": "BLOCK",
+            "checks": [
+                {
+                    "check": "author_year_citations_resolve",
+                    "severity": "hard",
+                    "status": "violated",
+                }
+            ],
+        },
+    )
+
+    citation_score = next(item["score"] for item in result["dimensions"] if item["name"] == "citation_closure")
+    assert citation_score == 8

@@ -921,7 +921,7 @@ class ResearchAgentService:
         if task.command in {"/peer-review", "/final-check"}:
             manuscript_path, manuscript = find_manuscript(Path(task.artifact_root))
             payload = (
-                build_review_package(manuscript_path, manuscript)
+                build_review_package(manuscript_path, manuscript, Path(task.artifact_root))
                 if task.command == "/peer-review"
                 else build_final_gate_report(manuscript_path, manuscript, Path(task.artifact_root))
             )

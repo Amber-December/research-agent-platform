@@ -112,3 +112,29 @@ git push --force-with-lease origin feat/paper-writing-review-capabilities
 - 未授权全文抓取、绕过付费墙、伪造引用、结果或审稿结论。
 - Word/PDF 原生格式保真编辑、PDF/VLM 视觉审稿、官方 venue guideline 自动抓取。
 - 从原项目直接复制其虚拟环境、缓存、评测运行产物或整套独立 API/runtime。
+
+## 9. 当前平台与分支架构
+
+平台运行链路为：`FastAPI API` → `ResearchAgentService` → `router/intent.py` 意图路由 → `graphs/workflows.py` LangGraph 工作流 → `state/` 会话与任务状态、`artifacts/` 产物索引 → `agent-workspace/local/<session_id>/` 会话工作区 → `/chat` SSE 与下载链接。
+
+核心目录职责如下：
+
+| 目录 | 平台职责 | 本分支融合点 |
+| --- | --- | --- |
+| `router/` | 显式命令、别名和启发式/LLM 路由 | 注册 `/peer-review`、`/final-check` |
+| `graphs/` | 工作流阶段、进度和产物交付 | 接入模拟审稿、投稿终检阶段 |
+| `paper/` | 稿件、来源选择、证据图、修订和导出 | `FINAL_GATE_REPORT.*`、`REVISION_AUDIT.json` |
+| `rebuttal/` | 审稿意见、回复和闭环 | `reviews/REVIEW_PACKAGE.*` |
+| `Content/` | 上下文、索引、评测和任务记录 | `WRITING_CONTEXT.json`、`WRITING_EVALUATION_REPORT.json` |
+| `bib/` | BibTeX、论文 PDF 和文献下载记录 | `@key`、`\\cite{}`、author-year 闭合检查 |
+| `tests/` | 工作流、API、文件、UI 契约的回归测试 | 写作/审稿/终检和对抗性 rubric 测试 |
+
+当前分支没有平行运行时：写作能力复用现有 `/write`，文献综述仍由 `/review` 负责，返修仍由 `/rebuttal` 负责；新增能力只通过命令路由和标准 artifact 接入前端。
+
+## 10. 当前实现状态
+
+已实现：`/write` 写作上下文与修订审计；`/peer-review` 确定性模拟审稿；`/final-check` 稿件、引用、占位符、Markdown/LaTeX 章节、LaTeX 交叉引用和 Markdown 图表编号终检；写作质量 rubric；`@key`、`\\cite{}`、常见单姓 author-year 与 BibTeX 闭合；PE ID 与 `PAPER_EVIDENCE_MAP.json` 闭合；强主张和量化主张的邻近证据检查；前端文件上传、SSE 进度和 artifact 下载链路。
+
+尚未实现：真正的多角色 LLM 同行评审与语义去重；author-year 的复杂姓名、机构作者、跨年后缀和 BibTeX 宏的完整解析；PDF/VLM 视觉审稿；不同期刊官方规范自动抓取；自动把 review findings 转成 `/rebuttal` 修订矩阵并安全修改正文；真实投稿系统提交。
+
+当前质量边界：`PASS` 只表示确定性规则通过，不等于期刊接收；模拟审稿不代表真实审稿决定；无模型凭据时，平台 API 的模型调用仍会因缺少 `UPSTREAM_API_KEY` 失败，但本地确定性工作流和测试不依赖真实模型。

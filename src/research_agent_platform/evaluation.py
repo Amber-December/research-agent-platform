@@ -38,13 +38,15 @@ def evaluate_review_package(payload: dict, manuscript: str = "", final_payload: 
     major_findings = [item for item in findings if item.get("severity") == "major"]
     scores = {dimension.name: 0 for dimension in RUBRIC}
     scores["structure"] = 20 if not any(item.get("category") == "structure" and item.get("severity") == "major" for item in findings) and not any(check.get("check") == "required_sections_present" for check in hard_violations) else 8
-    scores["citation_closure"] = 20 if not any(item.get("category") == "citations" and item.get("severity") == "major" for item in findings) and not any(check.get("check") == "citation_keys_resolve" for check in hard_violations) else 8
+    citation_checks = {"citation_keys_resolve", "author_year_citations_resolve"}
+    scores["citation_closure"] = 20 if not any(item.get("category") == "citations" and item.get("severity") == "major" for item in findings) and not any(check.get("check") in citation_checks for check in hard_violations) else 8
     complete = [item for item in findings if item.get("location") and item.get("severity") and item.get("recommended_action")]
     scores["actionability"] = min(20, round(20 * len(complete) / max(1, len(findings)))) if findings else 0
     scores["risk_disclosure"] = 15 if re.search(r"(?im)^#+\s+(limitations?|讨论)", manuscript) else 4
     unsupported_claim = bool(re.search(r"\b(?:universal|always|never|outperform(?:s|ed)?|significant(?:ly)?|prove(?:s|d)?)\b", manuscript, re.I))
     evidence_major = any(item.get("category") in {"claims", "evidence"} for item in major_findings)
-    scores["evidence_faithfulness"] = 8 if "AUTHOR INPUT NEEDED" in manuscript.upper() or unsupported_claim or evidence_major else 25
+    evidence_gate_failure = any(check.get("check") == "evidence_ids_resolve" for check in hard_violations)
+    scores["evidence_faithfulness"] = 8 if "AUTHOR INPUT NEEDED" in manuscript.upper() or unsupported_claim or evidence_major or evidence_gate_failure else 25
     raw_total = sum(scores.values())
     ceiling = 100
     ceiling_reason = None
