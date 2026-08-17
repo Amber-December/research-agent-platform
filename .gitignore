@@ -19,6 +19,16 @@ agent-workspace/
 /test-runs/
 /.playwright-cli/
 /.pytest_cache/
+/output/
+/tmp/
+
+# Lawfully downloaded style-learning papers stay local; manifests and derived rules are reviewable.
+/resources/publication/style-corpus/fulltext/
+/resources/publication/style-corpus/download-report.json
+
+# Agent-local plans and meeting evidence
+/.superpowers/
+/docs/superpowers/
 
 # Local editor and OS files
 .vscode/

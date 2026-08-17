@@ -73,3 +73,19 @@ def test_author_year_closure_violation_reduces_citation_score():
 
     citation_score = next(item["score"] for item in result["dimensions"] if item["name"] == "citation_closure")
     assert citation_score == 8
+
+
+def test_evaluation_includes_discipline_adaptation_findings():
+    result = evaluate_review_package({}, "A clinical intervention.", {}, discipline="medicine_clinical")
+
+    assert len(result["discipline_findings"]) == 3
+
+
+def test_thesis_unresolved_author_inputs_count_as_risk_disclosure():
+    result = evaluate_review_package(
+        {"findings": []},
+        "# 研究框架\n\n## 未解决作者输入\n\n- [AUTHOR INPUT NEEDED：补充案例边界。]",
+    )
+
+    risk_score = next(item["score"] for item in result["dimensions"] if item["name"] == "risk_disclosure")
+    assert risk_score == 15

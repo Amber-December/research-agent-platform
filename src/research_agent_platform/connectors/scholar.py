@@ -138,7 +138,27 @@ class LiteratureBundle:
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def prompt_excerpt(self, *, limit: int = 4500) -> str:
-        return self.to_markdown()[:limit]
+        lines = ["# Admitted Evidence Records"]
+        for index, paper in enumerate(self.papers, start=1):
+            stable_id = paper.paper_id or f"P{index:03d}"
+            heading = f"### [{stable_id}]"
+            if paper.title:
+                heading += f" {paper.title}"
+            if paper.year:
+                heading += f" ({paper.year})"
+            lines.extend(["", heading])
+            if paper.authors:
+                lines.append(f"- Authors: {', '.join(paper.authors[:8])}")
+            if paper.venue:
+                lines.append(f"- Venue: {paper.venue}")
+            if paper.url:
+                lines.append(f"- Source URL: {paper.url}")
+            if paper.identifiers:
+                identifiers = ", ".join(f"{key}={value}" for key, value in paper.identifiers.items())
+                lines.append(f"- Stable identifiers: {identifiers}")
+            if paper.abstract:
+                lines.extend(["", "Admitted evidence summary:", paper.abstract.strip()])
+        return ("\n".join(lines) + "\n")[:limit]
 
 
 class ScholarSearchService:

@@ -36,6 +36,7 @@ def test_review_named_upload_routes_to_rebuttal():
     assert classify_upload("reviewer_comments.docx") == "rebuttal"
     assert classify_upload("审稿意见.pdf") == "rebuttal"
     assert classify_upload("final_paper.pdf") == "paper"
+    assert classify_upload("manuscript.md") == "paper"
 
 
 def test_rebuttal_source_set_uses_latest_uploaded_paper_and_review(service: ResearchAgentService):

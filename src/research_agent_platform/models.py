@@ -153,6 +153,8 @@ class TaskRun(BaseModel):
     objective: str
     route_source: RouteSource
     workflow_title: str
+    workflow_mode: str = ""
+    skill_bundle: list[str] = Field(default_factory=list)
     status: TaskStatus = "running"
     current_stage_index: int = 0
     current_stage_name: str = ""

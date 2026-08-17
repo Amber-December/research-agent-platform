@@ -12,6 +12,7 @@ class StageDefinition:
     artifact_kind: str
     required_sections: list[str]
     skill_paths: list[str] = field(default_factory=list)
+    model_role: str = "default"
     hitl: bool = False
     checkpoint_title: str = ""
 
@@ -30,36 +31,6 @@ def _skills(*names: str) -> list[str]:
 
 def workflow_registry() -> dict[str, WorkflowDefinition]:
     return {
-        "/peer-review": WorkflowDefinition(
-            command="/peer-review",
-            title="Simulated Peer Review Workflow",
-            description="Produce a deterministic, structured simulated peer-review package for an uploaded or generated manuscript.",
-            stage_definitions=[
-                StageDefinition(
-                    name="simulated_peer_review",
-                    title="Simulated Peer Review",
-                    instruction="This stage is generated deterministically by the platform.",
-                    artifact_path="rebuttal/reviews/REVIEW_PACKAGE.json",
-                    artifact_kind="review",
-                    required_sections=["Decision", "Findings", "Limitations"],
-                )
-            ],
-        ),
-        "/final-check": WorkflowDefinition(
-            command="/final-check",
-            title="Pre-submission Final Check Workflow",
-            description="Run deterministic manuscript, bibliography, placeholder, and LaTeX cross-reference checks.",
-            stage_definitions=[
-                StageDefinition(
-                    name="final_check",
-                    title="Pre-submission Final Check",
-                    instruction="This stage is generated deterministically by the platform.",
-                    artifact_path="paper/FINAL_GATE_REPORT.json",
-                    artifact_kind="review",
-                    required_sections=["Decision", "Checks"],
-                )
-            ],
-        ),
         "/plan": WorkflowDefinition(
             command="/plan",
             title="Research Planning Workflow",
@@ -183,6 +154,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "comm-lit-review",
                         "novelty-check",
                     ),
+                    model_role="idea_generator",
                     hitl=True,
                     checkpoint_title="Topic Selection Approval",
                 ),
@@ -213,6 +185,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "research-review",
                         "idea-discovery-robot",
                     ),
+                    model_role="idea_critic",
                 ),
                 StageDefinition(
                     name="final_idea",
@@ -240,6 +213,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "claims-drafting",
                         "research-review",
                     ),
+                    model_role="idea_finalizer",
                 ),
             ],
         ),
@@ -542,7 +516,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Revise PAPER_DRAFT.md using every issue in PAPER_SELF_REVIEW.md. Make the smallest evidence-supported "
                         "change that resolves each issue, preserve facts, numbers, equations, citations, figure/table references, "
-                        "and provenance, and retain unresolved scientific gaps as [AUTHOR INPUT NEEDED]. Return the complete "
+                        "and provenance, and retain unresolved scientific gaps as [AUTHOR INPUT NEEDED]. When comparative "
+                        "uncertainty is unavailable, report only the observed mean difference rather than stable outperformance "
+                        "or component contribution. Return the complete "
                         "revised manuscript, not a change summary."
                     ),
                     artifact_path="paper/PAPER_REVISED.md",
@@ -566,6 +542,14 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "citation-audit",
                         "claims-drafting",
                     ),
+                ),
+                StageDefinition(
+                    name="final_quality_gate",
+                    title="Publication Quality Gate",
+                    instruction="This stage is generated deterministically by the platform.",
+                    artifact_path="paper/FINAL_GATE_REPORT.json",
+                    artifact_kind="review",
+                    required_sections=["Decision", "Checks"],
                 ),
             ],
         ),
@@ -608,28 +592,62 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     ),
                 ),
                 StageDefinition(
+                    name="review_section_plan",
+                    title="Review Section Plan",
+                    instruction=(
+                        "Build a compact, evidence-grounded writing plan before drafting the review. Assign every required "
+                        "review section a unique job, a proportional word or character budget when the user specified a "
+                        "length, and the admitted stable IDs or local sources it must use. State which observations must not "
+                        "be repeated across sections. Preserve all material conditions, unresolved unknowns, and citation "
+                        "boundaries. This is a planning artifact, not prose for the final review."
+                    ),
+                    artifact_path="bib/REVIEW_SECTION_PLAN.md",
+                    artifact_kind="plan",
+                    required_sections=[
+                        "Target Length and Budget",
+                        "Section Responsibilities",
+                        "Evidence Assignment",
+                        "Non-duplication Rules",
+                        "Boundary Preservation",
+                    ],
+                    skill_paths=_skills(
+                        "paper-literature-review",
+                        "paper-style-learn",
+                        "paper-draft",
+                    ),
+                ),
+                StageDefinition(
                     name="literature_synthesis",
                     title="Literature Synthesis",
                     instruction=(
-                        "Use only the admitted retrieval records and extracted local literature. Start with a paper evidence table "
-                        "covering stable ID or local path, year, venue/status, problem, method, data or scenario, key finding, "
-                        "limitation, evidence depth, and relevance. Then synthesize by technical axis rather than search order, "
-                        "separating foundational from recent work and formal publications from preprints. Compare methods, datasets, "
-                        "baselines, metrics, contradictions, and deployment evidence. Every paper-level factual statement must cite "
-                        "a supplied stable ID such as [P001], or an exact local source path with page when available. Distinguish "
-                        "metadata/abstract evidence from full-text evidence. Provider failures are retrieval limitations, never domain facts."
+                        "Write a reader-ready literature review article from only the admitted retrieval records and extracted local "
+                        "literature. Follow the formal article contract selected for the requested review type and language. Choose "
+                        "thematic subsections from the evidence and review question rather than a fixed field template. Compare the "
+                        "axes that materially explain agreement or conflict; omit an inapplicable axis instead of filling prose with "
+                        "missing-metadata statements. In Review Scope and Approach, include a traceable retrieval scope summary and "
+                        "state every material condition, assumption, or boundary that limits interpretation. Every paper-level factual statement must cite a supplied stable ID such as [P001], "
+                        "or an exact local source path with page when available. Distinguish metadata/abstract evidence from full-text "
+                        "evidence. Keep retrieval logs, evidence matrices, source tables, citation audits, platform status and internal "
+                        "quality checks outside the manuscript body unless the user explicitly requests a systematic-review table or "
+                        "supplement. Provider failures are retrieval limitations, never domain facts. Follow REVIEW_SECTION_PLAN.md as "
+                        "a hard budget and evidence-allocation contract; do not repeat an observation merely to fill sections. "
+                        "The admitted record fields are exhaustive: do not infer or supply event counts, site counts, climate labels, "
+                        "study dates, residence times, QA/QC procedures, maintenance histories, article titles, authors, venues, DOIs, "
+                        "or URLs unless those exact fields are present in the admitted records. If a field is absent, write a natural "
+                        "boundary statement such as 'not supplied in the admitted package' and do not put an author-input placeholder "
+                        "in the reader-facing manuscript."
                     ),
                     artifact_path="bib/LITERATURE_REVIEW.md",
                     artifact_kind="report",
                     required_sections=[
-                        "Executive Summary",
-                        "Paper Evidence Table",
-                        "Research Landscape",
-                        "Foundational and Recent Work",
-                        "Methods and Datasets",
-                        "Baselines and Metrics",
-                        "Key Findings",
-                        "Contradictions and Limitations",
+                        "Abstract",
+                        "Keywords",
+                        "Introduction",
+                        "Review Scope and Approach",
+                        "Thematic Synthesis",
+                        "Contradictions and Boundary Conditions",
+                        "Discussion",
+                        "Conclusion",
                         "References",
                     ],
                     skill_paths=_skills(
@@ -980,6 +998,14 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "integrity-forensics",
                         "experiment-audit",
                     ),
+                ),
+                StageDefinition(
+                    name="final_quality_gate",
+                    title="Publication Quality Gate",
+                    instruction="This stage is generated deterministically by the platform.",
+                    artifact_path="paper/FINAL_GATE_REPORT.json",
+                    artifact_kind="review",
+                    required_sections=["Decision", "Checks"],
                 ),
             ],
         ),

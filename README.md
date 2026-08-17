@@ -15,8 +15,8 @@ Research agent platform aligned to the PRD and tech spec, grounded by the vendor
 ## Run
 
 ```bash
-uv sync --no-editable --project J:\Desktop\科研agent\research-agent-platform
-uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-dir src research_agent_platform.api:app --host 127.0.0.1 --port 8000
+uv sync --no-editable
+uv run uvicorn --app-dir src research_agent_platform.api:app --host 127.0.0.1 --port 8000
 ```
 
 ## OpenAI-compatible API
@@ -38,13 +38,11 @@ uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-di
 
 ## Research workflow commands
 
-- `/review` first writes a reproducible query protocol, then runs multi-query scholarly retrieval, relevance filtering, DOI/arXiv/title de-duplication, and a traceability gate. Formal synthesis requires at least 10 admitted external or relevant local sources; otherwise it stops after the search and quality report instead of inventing a review.
+- `/review` is the literature-review workflow, not peer review. It first writes a reproducible query protocol, then runs multi-query scholarly retrieval, relevance filtering, DOI/arXiv/title de-duplication, and a traceability gate. A request to “写综述” additionally produces a thematic review draft; otherwise it hands evidence to `/idea`, `/plan`, or `/write`. Formal synthesis requires at least 10 admitted external or relevant local sources; otherwise it stops after the search and quality report instead of inventing a review.
 - `/idea` generates candidate ideas, stress-tests novelty and feasibility, and writes the selected direction under `idea/FINAL_IDEA.md`. It may use targeted literature search but does not create the experiment plan.
 - `/plan` turns `FINAL_IDEA` or a directly supplied research objective into `plan/RESEARCH_BLUEPRINT.md`, `plan/EXPERIMENT_PLAN.md`, and `plan/EXECUTION_CHECKLIST.md`.
 - `/write` freezes an attachment/session/workspace SourceSet, extracts stable evidence IDs, plans and drafts the paper, runs an independent self-review, produces an evidence-preserving revision, and writes deterministic citation/delivery reports before DOCX/PDF/TeX export.
-- `/rebuttal` requires both a completed paper and reviewer comments. It maps each comment to paper evidence, drafts point-by-point replies, produces a revised manuscript and revision ledger, then verifies comment-ID coverage in `REBUTTAL_CLOSURE_REPORT.json`.
-- `/peer-review` runs a deterministic, structured simulated peer review over an uploaded or generated Markdown, TXT, or LaTeX manuscript. It writes `rebuttal/reviews/REVIEW_PACKAGE.json`; it is advisory and is not a journal decision.
-- `/final-check` runs deterministic pre-submission checks for manuscript presence, citation-key resolution, unresolved placeholders, and LaTeX cross-reference closure. It writes `paper/FINAL_GATE_REPORT.json` with `PASS`, `REVISE`, or `BLOCK`.
+- `/rebuttal` diagnoses an uploaded or generated manuscript when comments are absent; when reviewer comments are present, it maps each comment to paper evidence, drafts point-by-point replies, produces a revised manuscript and revision ledger, then verifies comment-ID coverage in `REBUTTAL_CLOSURE_REPORT.json`. Simulated peer review and deterministic pre-submission checks are internal stages; they are advisory quality controls, not journal decisions.
 - `/code`, `/fig`, `/present`, and `/wiki` continue implementation planning, figure production, presentation generation, and persistent research memory.
 
 Each command can run independently. When prior `/review` or `/idea` tasks exist in the same session, downstream commands prioritize their evidence map, research gaps, final idea, and research contract as handoff context.
@@ -117,8 +115,8 @@ This implementation is a one-way incremental mirror from local workspace to Seaf
 ## Deploy
 
 ```bash
-uv sync --no-editable --project J:\Desktop\科研agent\research-agent-platform
-uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-dir src research_agent_platform.api:app --host 0.0.0.0 --port 8000
+uv sync --no-editable
+uv run uvicorn --app-dir src research_agent_platform.api:app --host 0.0.0.0 --port 8000
 ```
 
 ## OpenAI SDK

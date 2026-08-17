@@ -52,10 +52,19 @@ class AppConfig(BaseModel):
     )
     upstream_api_key: str = Field(default_factory=lambda: os.getenv("UPSTREAM_API_KEY", ""))
     upstream_model: str = Field(default_factory=lambda: os.getenv("UPSTREAM_MODEL", ""))
+    upstream_review_model: str = Field(
+        default_factory=lambda: os.getenv("UPSTREAM_REVIEW_MODEL", "")
+    )
+    idea_generator_model: str = Field(default_factory=lambda: os.getenv("IDEA_GENERATOR_MODEL", ""))
+    idea_critic_model: str = Field(default_factory=lambda: os.getenv("IDEA_CRITIC_MODEL", ""))
+    idea_final_model: str = Field(default_factory=lambda: os.getenv("IDEA_FINAL_MODEL", ""))
     public_api_key: str = Field(default_factory=lambda: os.getenv("PUBLIC_API_KEY", ""))
     image_model: str = Field(default_factory=lambda: os.getenv("IMAGE_MODEL", "gpt-image-2"))
     request_timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("REQUEST_TIMEOUT_SECONDS", "120"))
+    )
+    workflow_stage_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("WORKFLOW_STAGE_TIMEOUT_SECONDS", "360"))
     )
     image_request_timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("IMAGE_REQUEST_TIMEOUT_SECONDS", "300"))

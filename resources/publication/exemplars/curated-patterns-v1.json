@@ -1,0 +1,63 @@
+{
+  "schema_version": "curated-exemplar-patterns/v1",
+  "id": "curated-exemplar-patterns-v1",
+  "corpus_policy": {
+    "selection": "Use target-venue, same-genre, lawfully accessible full texts where possible; retain metadata and derived rhetorical patterns, never redistributed article text.",
+    "minimum_for_venue_claim": "Three same-genre full-text exemplars plus the current official author guidance.",
+    "prohibitions": ["Do not copy exemplar wording.", "Do not treat citation count as a style-quality guarantee.", "Do not infer venue submission rules from exemplars alone."]
+  },
+  "profiles": {
+    "ai_computer_science": {
+      "sources": ["https://neurips.cc/public/guides/PaperChecklist", "https://doi.org/10.1038/s41592-019-0686-2"],
+      "research_article": ["Open the Results with the comparison question, then name dataset, split, metric, comparator and observed result before interpretation.", "Separate benchmark evidence, ablation evidence and generalization evidence; each supports a different claim.", "For software, methods, and resource papers, use a contribution-matched architecture such as scope, design choices, technical improvements, validation, governance, downstream use, and limitations instead of forcing IMRAD."],
+      "literature_review": ["Synthesize by task, setting, evidence and disagreement; do not enumerate papers chronologically.", "For each claimed trend, expose which datasets, splits, metrics and compute settings make studies comparable or incomparable."]
+    },
+    "medicine_clinical": {
+      "sources": ["https://doi.org/10.1136/bmj.n71", "https://doi.org/10.1136/bmj.c332"],
+      "research_article": ["Use the clinical question to organize population, design, exposure or intervention, comparator, outcome and follow-up.", "Report effect size and uncertainty together, then distinguish clinical interpretation from bias and applicability.", "Expose design, conduct, analysis and interpretation details so readers can judge bias; a statement of rigor does not substitute for reporting."],
+      "literature_review": ["Make eligibility, outcome definitions, risk of bias and heterogeneity visible before drawing a pooled narrative.", "Separate absence of evidence from evidence of no effect.", "For systematic reviews, make search, screening, appraisal, synthesis, certainty and excluded-study logic auditable; reporting completeness does not prove methodological validity."]
+    },
+    "environmental_science_engineering": {
+      "sources": ["https://doi.org/10.1029/2018EA000405", "https://doi.org/10.1021/acs.est.1c08089"],
+      "research_article": ["Move from site and measurement condition to observation, process evidence and only then management implication.", "Keep concentration, load, time scale and spatial scale distinct in both prose and comparisons."],
+      "literature_review": ["Organize evidence by process, system boundary and measurement design, then surface scale-dependent disagreement.", "Treat management implications as conditional on the evidence boundary, not as a substitute for synthesis."]
+    },
+    "chemistry_materials": {
+      "sources": ["https://doi.org/10.1126/science.aad4998", "https://doi.org/10.1038/s41524-019-0221-0"],
+      "research_article": ["Use a processing or synthesis → structure → property → mechanism chain, labelling each inferential step.", "Compare properties only after specifying composition, processing history and test condition."],
+      "literature_review": ["Build the taxonomy around material class, fabrication route, characterization strength and functional condition.", "Distinguish reported performance from mechanistic explanation and long-term stability evidence."]
+    },
+    "social_science": {
+      "sources": ["https://doi.org/10.1177/0003122412472380", "https://doi.org/10.1146/annurev-soc-071913-043145"],
+      "research_article": ["Develop the argument as construct → mechanism → operationalization → design → finding → scope condition.", "Separate descriptive, associational, causal and normative sentences rather than letting one stand in for another."],
+      "literature_review": ["Compare theories by construct definition, mechanism, design and population instead of author or year.", "Use disagreement to identify identification, measurement or context differences that a new study must resolve."]
+    },
+    "law_legal": {
+      "sources": ["https://www.bluebook.law.harvard.edu/", "https://www.law.cornell.edu/wex"],
+      "research_article": ["Build each analytical unit as issue → authority weight → holding or rule → application → counterauthority.", "Place jurisdiction and temporal scope beside every legal proposition."],
+      "literature_review": ["Synthesize authorities by jurisdiction, hierarchy, holding versus dicta and subsequent treatment.", "Keep doctrinal description distinct from the author's normative recommendation."]
+    },
+    "arts_humanities": {
+      "sources": ["https://www.mla.org/Resources/Guidelines-and-Data/MLA-Style", "https://doi.org/10.1017/S002187582200060X"],
+      "research_article": ["Let a paragraph move from textual or archival object to close evidence, interpretation, alternative reading and historical boundary.", "Keep edition, translation, page or archive provenance adjacent to the inference it enables."],
+      "literature_review": ["Organize competing interpretations by object, archive, method and stakes, not merely by scholarly chronology.", "Treat authorial intention as unresolved unless primary evidence actually supports it."]
+    },
+    "mathematics_theory": {
+      "sources": ["https://arxiv.org/help/submit_tex", "https://doi.org/10.1090/S0002-9947-1963-0152614-3"],
+      "research_article": ["Introduce definitions and assumptions before any theorem that uses them, then give the proof roadmap before technical detail.", "State precisely whether a result is proved, assumed, conjectured or illustrated by an example."],
+      "literature_review": ["Compare results through hypotheses, conclusion strength, proof technique and counterexamples.", "Never collapse a special-case theorem into a general statement during synthesis."]
+    },
+    "life_science_biology": {
+      "sources": ["https://doi.org/10.1038/s41586-018-0598-6", "https://doi.org/10.1371/journal.pbio.3000417"],
+      "research_article": ["Use figure-led Results: question, experimental system, controls, observation and calibrated inference.", "Distinguish biological replicates, technical repeats, association and functional mechanism evidence.", "Reserve strong mechanism language for convergent anatomical, physiological and perturbation evidence; distinguish activation sufficiency from inhibition necessity."],
+      "literature_review": ["Synthesize by model system, assay, perturbation and evidential strength, then identify why results conflict.", "Separate mechanistic proposals from observations that are consistent with more than one mechanism."]
+    }
+  },
+  "document_profiles": {
+    "degree_thesis": {
+      "sources": ["GB/T 7713.1-2006", "user manuscript structure"],
+      "zh": ["Do not force a journal IMRAD structure. Preserve the thesis's existing chapter logic unless the author approves structural redesign.", "For each chapter, state its research question, material or data, analytical method, finding, contribution to the dissertation argument and unresolved limitation.", "Keep Chinese terminology, abbreviations, figure/table references and citation keys consistent across chapters; do not translate the English-paper rhythm mechanically into Chinese."],
+      "en": ["Preserve the dissertation's chapter architecture and make each chapter's contribution to the cumulative argument explicit.", "Do not rewrite an evidence-limited chapter as a completed journal article."]
+    }
+  }
+}

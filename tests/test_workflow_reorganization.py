@@ -7,7 +7,14 @@ from pathlib import Path
 import httpx
 
 from research_agent_platform import agent as agent_module
-from research_agent_platform.agent import ResearchAgentService
+from research_agent_platform.agent import (
+    ResearchAgentService,
+    _clean_generated_artifact,
+    _is_plan_derived_section_request,
+    _requested_write_sections,
+    _retain_requested_write_sections,
+    _strip_plan_abstract_evidence_markers,
+)
 from research_agent_platform.config import config
 from research_agent_platform.connectors.seafile import SeafileSyncResult, SeafileWorkspaceSync
 from research_agent_platform.graphs.workflows import workflow_registry
@@ -15,11 +22,115 @@ from research_agent_platform.models import ArtifactRecord, ChatSession, CloudWor
 from research_agent_platform.router.intent import route_message
 
 
+def test_generated_artifact_cleaner_removes_tool_chatter_before_markdown_title():
+    contaminated = (
+        "I’m checking the workspace now.\n"
+        "to=functions.shell code={\"command\": [\"find\"]}\n"
+        "# Evidence-Bounded Paper\n\n"
+        "## Abstract\n\nThe supported result is 84.2%."
+    )
+
+    assert _clean_generated_artifact(contaminated).startswith("# Evidence-Bounded Paper")
+    assert "functions.shell" not in _clean_generated_artifact(contaminated)
+
+
+def test_generated_artifact_cleaner_removes_status_and_path_preamble():
+    contaminated = (
+        "Status: inspecting /Users/amber/project\n"
+        "I’m checking the workspace now.\n"
+        "# Paper\n\n## Abstract\n\nSupported content."
+    )
+
+    cleaned = _clean_generated_artifact(contaminated)
+
+    assert cleaned.startswith("# Paper")
+    assert "/Users/amber/project" not in cleaned
+
+
+def test_generated_artifact_cleaner_preserves_clean_markdown():
+    clean = "# Paper\n\n## Abstract\n\nSupported content."
+
+    assert _clean_generated_artifact(clean) == clean
+
+
+def test_generated_artifact_cleaner_rejects_leakage_without_title_or_after_title():
+    assert _clean_generated_artifact("I’m listing files now.\nSupported content.") == ""
+    assert _clean_generated_artifact("# Paper\n\nSupported content.\nStatus: inspecting") == ""
+
+
+def test_plan_derived_request_keeps_only_explicit_sections():
+    content = "## 摘要\n\n拟开展研究。\n\n## 关键词\n\n雨洪；调蓄\n\n## Introduction\n\nUnexpected prose."
+
+    assert _is_plan_derived_section_request("根据博士研究计划撰写拟研究摘要")
+    assert _retain_requested_write_sections(content, ["摘要", "关键词"]) == "## 摘要\n拟开展研究。\n\n## 关键词\n雨洪；调蓄\n"
+
+
+def test_plan_based_degree_abstract_normalizes_english_heading_and_inline_keywords():
+    content = (
+        "# 城市雨洪调蓄系统拟研究摘要（修订稿）\n\n"
+        "## Abstract\n\n拟开展城市雨洪调蓄系统研究。\n\n"
+        "**关键词：** 城市雨洪；调蓄系统\n\n"
+        "## Introduction\n\nUnexpected prose."
+    )
+
+    assert _retain_requested_write_sections(content, ["摘要", "关键词"]) == (
+        "## 摘要\n拟开展城市雨洪调蓄系统研究。\n\n"
+        "## 关键词\n城市雨洪；调蓄系统\n"
+    )
+
+
+def test_plan_based_degree_abstract_removes_internal_evidence_identifiers():
+    content = (
+        "## 摘要\n"
+        "现有材料仅支持研究设计（PE-AAAAAAAAAA；PE-BBBBBBBBBB）。"
+        "研究将据此展开 [PE-CCCCCCCCCC]。\n\n"
+        "## 关键词\n城市雨洪；调蓄"
+    )
+
+    assert _strip_plan_abstract_evidence_markers(content) == (
+        "## 摘要\n现有材料仅支持研究设计。研究将据此展开。\n\n"
+        "## 关键词\n城市雨洪；调蓄"
+    )
+
+
+def test_explicit_requested_section_contract_keeps_only_requested_chapter():
+    content = "## 摘要\n\n摘要。\n\n## 引言\n\n引言。\n\n## 方法\n\n方法。"
+
+    sections = _requested_write_sections("根据研究计划撰写论文引言")
+
+    assert sections == ["引言"]
+    assert _retain_requested_write_sections(content, sections) == "## 引言\n引言。\n"
+
+
+def test_explicit_methods_request_is_not_forced_into_abstract_template():
+    content = "## 摘要\n摘要。\n\n## 方法\n样本与分析方法。\n\n## 结论\n结论。"
+    sections = _requested_write_sections("根据研究计划撰写论文方法")
+    assert sections == ["方法"]
+    assert _retain_requested_write_sections(content, sections) == "## 方法\n样本与分析方法。\n"
+
+
+def test_partial_journal_section_contract_is_not_full_manuscript():
+    task = TaskRun(
+        session_id="session-contract",
+        route_source="explicit",
+        command="/write",
+        objective="润色这篇论文的方法部分",
+        workflow_title="write",
+    )
+    instruction, sections = ResearchAgentService._stage_contract(
+        task,
+        next(stage for stage in workflow_registry()["/write"].stage_definitions if stage.name == "paper_revision"),
+    )
+    assert sections == ["方法"]
+    assert "only: 方法" in instruction
+
+
 def test_reorganized_workflow_boundaries():
     workflows = workflow_registry()
 
     assert [stage.name for stage in workflows["/review"].stage_definitions] == [
         "research_brief",
+        "review_section_plan",
         "literature_synthesis",
         "evidence_map",
         "research_gaps",
@@ -42,6 +153,7 @@ def test_reorganized_workflow_boundaries():
         "revision_plan",
         "revised_manuscript",
         "revision_ledger",
+        "final_quality_gate",
     ]
     assert [stage.name for stage in workflows["/write"].stage_definitions] == [
         "paper_evidence",
@@ -50,7 +162,21 @@ def test_reorganized_workflow_boundaries():
         "draft_sections",
         "paper_self_review",
         "paper_revision",
+        "final_quality_gate",
     ]
+
+    revision = next(stage for stage in workflows["/write"].stage_definitions if stage.name == "paper_revision")
+    assert "observed mean" in revision.instruction.lower()
+
+
+def test_review_synthesis_uses_evidence_driven_sections_not_fixed_field_template():
+    workflow = workflow_registry()["/review"]
+    synthesis = next(stage for stage in workflow.stage_definitions if stage.name == "literature_synthesis")
+
+    assert "Thematic Synthesis" in synthesis.required_sections
+    assert "Contradictions and Boundary Conditions" in synthesis.required_sections
+    assert "Foundational and Recent Work" not in synthesis.required_sections
+    assert "omit an inapplicable axis" in synthesis.instruction
 
 
 def test_router_separates_literature_review_and_peer_review():
@@ -225,6 +351,28 @@ def test_workflow_completes_only_after_cloud_link_is_ready(service: ResearchAgen
     assert "running" in observed_statuses
     assert result["status"] == "completed"
     assert "https://cloud.example/d/ready" in result["text"]
+
+
+def test_workflow_stage_timeout_records_diagnostic_progress(service: ResearchAgentService, monkeypatch):
+    session = service.store.create_session()
+    route = asyncio.run(route_message("/write 基于研究材料起草论文"))
+    assert route is not None
+    task = asyncio.run(service._create_task(session, "/write 基于研究材料起草论文", route))
+
+    async def stalled_stage(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        raise AssertionError("stage timeout should interrupt before this point")
+
+    monkeypatch.setattr(config, "workflow_stage_timeout_seconds", 0.01)
+    monkeypatch.setattr(service, "_execute_stage", stalled_stage)
+
+    reply = asyncio.run(service.execute_task(task.task_id))
+    failed = service.get_task(task.task_id)
+
+    assert reply["status"] == "failed"
+    assert failed is not None and failed.status == "failed"
+    assert "阶段超时" in failed.error
+    assert any("阶段超时" in item for item in failed.progress_log)
 
 
 def test_completed_reply_without_artifacts_omits_cloud_delivery_link(service: ResearchAgentService):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from ..upstream import generate_text
@@ -43,8 +44,6 @@ COMMAND_DESCRIPTIONS = {
     "/code": "turn the chosen plan into implementation and experiment execution materials",
     "/fig": "generate precise research charts from data or scientific illustrations with gpt-image-2",
     "/write": "create paper outlines, narrative reports, and draft sections",
-    "/peer-review": "run a structured simulated peer review of a completed manuscript",
-    "/final-check": "run deterministic pre-submission checks on a manuscript and bibliography",
     "/rebuttal": "analyze peer-review comments and produce rebuttal and revision materials",
     "/present": "prepare slides, poster, talk track, and Q&A materials",
     "/wiki": "update persistent research memory and reusable knowledge notes",
@@ -87,8 +86,6 @@ HEURISTICS = {
     "/code": ["experiment", "implement", "code", "reproduce", "run", "实验", "实现", "复现"],
     "/fig": ["figure", "plot", "diagram", "chart", "图", "图表", "流程图"],
     "/write": ["paper", "draft", "write", "manuscript", "论文", "写作", "草稿"],
-    "/peer-review": ["simulate review", "peer review", "paper review", "模拟审稿", "投稿前审稿"],
-    "/final-check": ["final check", "submission check", "投稿前检查", "终检"],
     "/rebuttal": [
         "rebuttal",
         "reviewer comments",
@@ -122,6 +119,25 @@ class RouteDecision:
     command: str
     source: str
     reason: str
+    workflow_mode: str = ""
+    skill_bundle: tuple[str, ...] = ()
+
+
+def _publication_mode(command: str, message: str) -> tuple[str, tuple[str, ...]]:
+    lowered = re.sub(r"^\s*/[\w-]+\b", "", message, flags=re.I).lower()
+    if command == "/review":
+        if any(term in lowered for term in ("写综述", "综述文章", "literature review", "narrative review", "survey paper", "review article", "synthesize", "synthesis", "compare authorities")) or ("综述" in lowered and any(term in lowered for term in ("写", "生成", "起草", "draft"))):
+            return "literature_review_writing", ("paper-init", "paper-style-learn", "paper-literature-review", "paper-draft", "paper-final-check")
+        return "literature_evidence", ("paper-init", "paper-literature-review")
+    if command == "/write":
+        if any(term in lowered for term in ("改论文", "修改稿件", "润色", "improve manuscript", "revise manuscript", "polish")):
+            return "manuscript_improvement", ("paper-init", "paper-revise", "paper-final-check")
+        return "research_materials_writing", ("paper-init", "paper-draft", "paper-review", "paper-final-check")
+    if command == "/rebuttal":
+        if any(term in lowered for term in ("审稿意见", "reviewer comment", "rebuttal", "返修", "回复审稿")):
+            return "rebuttal_revision", ("paper-review", "paper-revise-from-review", "paper-final-check")
+        return "manuscript_diagnosis", ("paper-init", "paper-review")
+    return "", ()
 
 
 def is_approval_message(message: str) -> bool:
@@ -170,6 +186,8 @@ async def route_message(message: str, context: str = "") -> RouteDecision | None
             command=best_command,
             source="implicit_heuristic",
             reason=f"keyword heuristic matches={best_score[0]} specificity={best_score[1]}",
+            workflow_mode=_publication_mode(best_command, stripped)[0],
+            skill_bundle=_publication_mode(best_command, stripped)[1],
         )
 
     options = "\n".join(f"{name}: {description}" for name, description in COMMAND_DESCRIPTIONS.items())
@@ -191,7 +209,8 @@ async def route_message(message: str, context: str = "") -> RouteDecision | None
     command = ALIASES.get(command, command)
     if command not in COMMAND_DESCRIPTIONS:
         return None
-    return RouteDecision(command=command, source="implicit_llm", reason=f"llm classifier -> {command}")
+    workflow_mode, skill_bundle = _publication_mode(command, stripped)
+    return RouteDecision(command=command, source="implicit_llm", reason=f"llm classifier -> {command}", workflow_mode=workflow_mode, skill_bundle=skill_bundle)
 
 
 def _looks_like_artifact_location_question(message: str) -> bool:
@@ -318,4 +337,5 @@ def explicit_route(message: str) -> RouteDecision | None:
     command = ALIASES.get(first_token, first_token)
     if command not in COMMAND_DESCRIPTIONS:
         return None
-    return RouteDecision(command=command, source="explicit", reason=f"explicit command {first_token}")
+    workflow_mode, skill_bundle = _publication_mode(command, stripped)
+    return RouteDecision(command=command, source="explicit", reason=f"explicit command {first_token}", workflow_mode=workflow_mode, skill_bundle=skill_bundle)

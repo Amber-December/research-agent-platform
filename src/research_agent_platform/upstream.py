@@ -33,6 +33,15 @@ class GeneratedImage:
     output_format: str
 
 
+def configured_model_for_role(role: str) -> str | None:
+    role_models = {
+        "idea_generator": config.idea_generator_model,
+        "idea_critic": config.idea_critic_model,
+        "idea_finalizer": config.idea_final_model,
+    }
+    return role_models.get(role, "") or config.upstream_model or None
+
+
 def _headers() -> dict[str, str]:
     if not config.upstream_api_key:
         raise HTTPException(status_code=500, detail="Missing UPSTREAM_API_KEY")
@@ -50,8 +59,13 @@ def _auth_headers() -> dict[str, str]:
 
 async def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     url = f"{config.upstream_base_url.rstrip('/')}/{path.lstrip('/')}"
-    async with httpx.AsyncClient(timeout=config.request_timeout_seconds) as client:
-        response = await client.request(method, url, headers=_headers(), json=payload)
+    response: httpx.Response | None = None
+    for attempt in range(3):
+        async with httpx.AsyncClient(timeout=config.request_timeout_seconds) as client:
+            response = await client.request(method, url, headers=_headers(), json=payload)
+        if response.status_code not in {502, 503, 504} or attempt == 2:
+            break
+    assert response is not None
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     return response.json()
