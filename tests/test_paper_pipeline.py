@@ -13,6 +13,7 @@ from research_agent_platform.paper_pipeline import (
     assess_writing_length,
     build_paper_quality_reports,
     collect_paper_evidence,
+    extract_inline_write_material,
     extract_venue_guidance_urls,
     extract_writing_length_contract,
     infer_source_section,
@@ -97,6 +98,82 @@ def test_infer_source_section_uses_heading_without_imposing_a_template(tmp_path:
 
     assert inferred["section"] == "方法"
     assert inferred["confidence"] == "high"
+
+
+def test_extract_inline_write_material_requires_an_explicit_substantive_source_label():
+    objective = (
+        "/write 请将以下研究材料改写为一段中文论文引言（约180字），仅使用给定事实，不添加文献或数据：\n"
+        "城市洪涝风险正在随极端降雨与高密度建设叠加而上升。"
+        "本研究拟结合居民避险行为调查和街区空间数据，分析避险可达性差异，"
+        "并识别不同社区在风险暴露与资源可及性方面的潜在不平等。"
+    )
+
+    material = extract_inline_write_material(objective)
+
+    assert material.startswith("城市洪涝风险")
+    assert "本研究拟结合" in material
+    assert extract_inline_write_material("/write 写一篇关于城市洪涝风险的引言") == ""
+
+
+def test_inline_write_material_becomes_the_default_frozen_source_set(service: ResearchAgentService):
+    session = service.store.create_session()
+    workspace = Path(session.workspace_root)
+    stale = workspace / "plan" / "stale.md"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("unrelated historical workspace evidence", encoding="utf-8")
+    task = TaskRun(
+        session_id=session.session_id,
+        user_id=session.user_id,
+        command="/write",
+        objective=(
+            "请将以下研究材料改写为中文论文引言：\n"
+            "城市洪涝风险正在随极端降雨与高密度建设叠加而上升。"
+            "本研究拟结合居民避险行为调查和街区空间数据，分析避险可达性差异，"
+            "并识别不同社区在风险暴露与资源可及性方面的潜在不平等。"
+        ),
+        route_source="explicit",
+        workflow_title="Paper Writing Workflow",
+        artifact_root=session.workspace_root,
+    )
+
+    service._configure_task_inputs(task, session)
+
+    assert task.write_source is not None
+    assert task.write_source.resolved_scope == "selected"
+    assert task.write_source.source_refs == ["Content/USER_PROVIDED_MATERIAL.md"]
+    material = workspace / "Content" / "USER_PROVIDED_MATERIAL.md"
+    assert material.is_file()
+    assert "城市洪涝风险" in material.read_text(encoding="utf-8")
+    assert "stale.md" not in task.write_source.source_refs
+
+
+def test_explicit_write_source_scope_wins_over_inline_material(service: ResearchAgentService):
+    session = service.store.create_session()
+    workspace = Path(session.workspace_root)
+    source = workspace / "plan" / "proposal.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("# 方法\n\n采用分层抽样。", encoding="utf-8")
+    task = TaskRun(
+        session_id=session.session_id,
+        user_id=session.user_id,
+        command="/write",
+        objective=(
+            "/write --source workspace 润色以下研究材料：\n"
+            "城市洪涝风险正在随极端降雨与高密度建设叠加而上升。"
+            "本研究拟结合居民避险行为调查和街区空间数据，分析避险可达性差异，"
+            "并识别不同社区在风险暴露与资源可及性方面的潜在不平等。"
+        ),
+        route_source="explicit",
+        workflow_title="Paper Writing Workflow",
+        artifact_root=session.workspace_root,
+    )
+
+    service._configure_task_inputs(task, session)
+
+    assert task.write_source is not None
+    assert task.write_source.resolved_scope == "workspace"
+    assert "plan/proposal.md" in task.write_source.source_refs
+    assert not (workspace / "Content" / "USER_PROVIDED_MATERIAL.md").exists()
 
 
 def test_writing_style_context_combines_discipline_language_and_verified_venue_rule():

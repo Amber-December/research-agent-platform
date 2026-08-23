@@ -421,6 +421,42 @@ def assess_writing_length(text: str, contract: dict[str, int | str]) -> dict[str
     }
 
 
+_INLINE_MATERIAL_LABEL = re.compile(
+    r"(?:以下(?:研究)?材料|(?:研究)?材料如下|研究计划如下|研究结果如下|原文如下|稿件如下|草稿如下|"
+    r"(?:research\s+)?materials?\s*(?:are|is|below)|(?:research\s+)?plan\s*(?:is|below)|"
+    r"(?:manuscript|draft)\s*(?:is|below))(?:[^\n:：]{0,200})(?:\s*(?:：|:)|\n)",
+    re.IGNORECASE,
+)
+
+
+def extract_inline_write_material(objective: str, *, minimum_characters: int = 80) -> str:
+    """Return explicitly labelled writing material embedded in a /write request.
+
+    A topic-led request must remain topic-led: material is accepted only after an
+    unambiguous user label and only when it has enough substantive content to be
+    a factual source.  This keeps ordinary instructions such as "write an
+    introduction about …" from accidentally bypassing retrieval.
+    """
+    match = _INLINE_MATERIAL_LABEL.search(objective)
+    if match is None:
+        return ""
+    material = objective[match.end() :].strip()
+    # A label followed by a very short phrase is normally still an instruction,
+    # not a source package.  Count visible characters so Chinese material is
+    # handled the same way as space-delimited English prose.
+    visible = re.sub(r"\s+", "", material)
+    if len(visible) < minimum_characters:
+        return ""
+    return material
+
+
+def has_explicit_write_source(objective: str, workspace_root: Path) -> bool:
+    """Whether the user explicitly chose source scope or workspace paths."""
+    return _requested_source_scope(objective) != "auto" or bool(
+        _extract_explicit_refs(objective, workspace_root)
+    )
+
+
 def resolve_write_source_config(
     objective: str,
     workspace_root: Path,

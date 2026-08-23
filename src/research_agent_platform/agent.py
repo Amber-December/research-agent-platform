@@ -63,7 +63,9 @@ from .paper_pipeline import (
     build_fulltext_venue_style_card,
     build_paper_quality_reports,
     collect_paper_evidence,
+    extract_inline_write_material,
     extract_writing_length_contract,
+    has_explicit_write_source,
     infer_source_section,
     load_workspace_venue_style_card,
     paper_evidence_prompt,
@@ -1283,6 +1285,32 @@ class ResearchAgentService:
                 session.upload_batches,
                 source_limit=config.write_source_limit,
             )
+            inline_material = extract_inline_write_material(task.objective)
+            if inline_material and not has_explicit_write_source(task.objective, root):
+                relative_path = "Content/USER_PROVIDED_MATERIAL.md"
+                material_artifact = self._write_text(
+                    task,
+                    relative_path,
+                    "# User-provided writing material\n\n"
+                    "This file records facts supplied directly by the user for this task. "
+                    "It is not an external publication and must not be converted into a bibliographic citation.\n\n"
+                    + inline_material
+                    + "\n",
+                    kind="document",
+                    description="User-provided writing material frozen as the default paper SourceSet.",
+                )
+                task.artifacts.append(material_artifact)
+                task.write_source = task.write_source.model_copy(
+                    update={
+                        "resolved_scope": "selected",
+                        "source_refs": [relative_path],
+                        "upload_batch_id": "",
+                        "selection_reason": (
+                            "用户在本次 /write 指令中明确提供了内联研究材料；"
+                            "仅以该材料作为默认事实来源。"
+                        ),
+                    }
+                )
         if task.command == "/fig":
             task.figure_source = resolve_figure_source_config(
                 task.objective,
