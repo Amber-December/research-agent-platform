@@ -49,6 +49,20 @@ REVIEW_FILENAME_TERMS = (
     "审阅意见",
     "修改意见",
 )
+PAPER_FILENAME_TERMS = (
+    "manuscript",
+    "paper",
+    "article",
+    "draft",
+    "final",
+    "revised",
+    "论文",
+    "稿件",
+    "初稿",
+    "终稿",
+    "定稿",
+    "修订稿",
+)
 
 
 def normalize_upload_target(target: str) -> str:
@@ -65,6 +79,8 @@ def classify_upload(filename: str, target: str = "auto") -> str:
     lowered_name = Path(filename).stem.lower()
     if any(term in lowered_name for term in REVIEW_FILENAME_TERMS):
         return "rebuttal"
+    if any(term in lowered_name for term in PAPER_FILENAME_TERMS):
+        return "paper"
     extension = Path(filename).suffix.lower()
     if extension == ".pdf" and re.match(r"^p\d{3}(?:[_-]|$)", lowered_name):
         return "bib"

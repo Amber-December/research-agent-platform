@@ -74,6 +74,31 @@ class ArtifactStore:
         self._write_manifest_for_root(root)
         return artifact
 
+    def record_existing(
+        self,
+        task_id: str,
+        relative_path: str,
+        *,
+        kind: ArtifactKind,
+        description: str,
+        task_root: str | Path | None = None,
+    ) -> ArtifactRecord:
+        root = self._resolve_root(task_id, task_root)
+        target = self._target_path(root, relative_path)
+        if not target.is_file():
+            raise FileNotFoundError(target)
+        clean_relative_path = relative_path.replace("\\", "/")
+        artifact = ArtifactRecord(
+            name=target.name,
+            kind=kind,
+            relative_path=clean_relative_path,
+            absolute_path=str(target.resolve()),
+            url_path=self.url_for(root, clean_relative_path),
+            description=description,
+        )
+        self._write_manifest_for_root(root)
+        return artifact
+
     def write_bytes(
         self,
         task_id: str,
@@ -88,31 +113,6 @@ class ArtifactStore:
         target = self._target_path(root, relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-        clean_relative_path = relative_path.replace("\\", "/")
-        artifact = ArtifactRecord(
-            name=target.name,
-            kind=kind,
-            relative_path=clean_relative_path,
-            absolute_path=str(target.resolve()),
-            url_path=self.url_for(root, clean_relative_path),
-            description=description,
-        )
-        self._write_manifest_for_root(root)
-        return artifact
-
-    def record_existing(
-        self,
-        task_id: str,
-        relative_path: str,
-        *,
-        kind: ArtifactKind,
-        description: str,
-        task_root: str | Path | None = None,
-    ) -> ArtifactRecord:
-        root = self._resolve_root(task_id, task_root)
-        target = self._target_path(root, relative_path)
-        if not target.is_file():
-            raise FileNotFoundError(target)
         clean_relative_path = relative_path.replace("\\", "/")
         artifact = ArtifactRecord(
             name=target.name,

@@ -8,6 +8,7 @@ from pptx import Presentation
 
 from research_agent_platform import agent as agent_module
 from research_agent_platform.agent import ResearchAgentService
+from research_agent_platform.models import CloudWorkspaceState
 
 from .conftest import run
 
@@ -18,6 +19,64 @@ def test_direct_chat_identity_reply(service: ResearchAgentService):
     assert result["task_id"] == ""
     assert result["checkpoint"] is None
     assert "科研" in result["text"]
+
+
+def test_workspace_question_is_deterministic_and_explains_session_scope(service: ResearchAgentService):
+    result = run(service.chat(None, "工作区是什么？"))
+
+    assert result["status"] == "idle"
+    assert result["task_id"] == ""
+    assert "当前会话专属的研究文件夹" in result["text"]
+    assert "点击“新会话”才会创建新的独立工作区" in result["text"]
+    assert "清华网盘同步未启用" in result["text"]
+    assert "HTTPStatusError" not in result["text"]
+    assert "agent-workspace" not in result["text"]
+
+
+def test_tsinghua_cloud_link_question_returns_only_the_current_workspace_url(
+    service: ResearchAgentService,
+):
+    session = service.store.get_or_create_session(None, "local")
+    session.cloud_workspace = CloudWorkspaceState(
+        status="synced",
+        configured=True,
+        preview_url="https://cloud.tsinghua.edu.cn/d/example/",
+    )
+    service.store.save_session(session)
+
+    result = run(service.chat(session.session_id, "我的清华网盘链接是什么"))
+
+    assert result["status"] == "idle"
+    assert result["task_id"] == ""
+    assert result["text"] == "你的清华网盘工作区链接：https://cloud.tsinghua.edu.cn/d/example/"
+    assert "公开分享链接" not in result["text"]
+    assert service.list_tasks(session.session_id) == []
+
+
+def test_information_question_does_not_create_a_workflow_task(service: ResearchAgentService, monkeypatch):
+    async def answer_question(**_kwargs):
+        return "PPT 是用于组织和展示内容的演示文稿格式。"
+
+    monkeypatch.setattr(agent_module, "generate_text", answer_question)
+    result = run(service.chat(None, "PPT是什么？"))
+
+    assert result["status"] == "idle"
+    assert result["task_id"] == ""
+    assert "演示文稿" in result["text"]
+    assert service.list_tasks(result["session_id"]) == []
+
+
+def test_natural_language_explanation_does_not_start_file_workflow(service: ResearchAgentService, monkeypatch):
+    async def answer_question(**_kwargs):
+        return "PPT 通常包括背景、方法、结果和结论。"
+
+    monkeypatch.setattr(agent_module, "generate_text", answer_question)
+    result = run(service.chat(None, "介绍一下PPT常见结构"))
+
+    assert result["status"] == "idle"
+    assert result["task_id"] == ""
+    assert "PPT" in result["text"]
+    assert service.list_tasks(result["session_id"]) == []
 
 
 def test_present_runs_without_routine_checkpoint(service: ResearchAgentService, isolated_env):
@@ -310,16 +369,15 @@ def test_idea_verification_runs_without_routine_checkpoint(service: ResearchAgen
             )
         if "Current stage: Final Idea" in user_prompt:
             return (
-                "# 最终研究 Idea：示例方向\n\n"
-                "## 一句话研究 Idea\n- Topic.\n\n"
-                "## 研究背景与核心问题\n- Background.\n\n"
-                "## 现有研究不足与可切入空白\n- Gap.\n\n"
-                "## 核心假设与方法思路\n- A.\n\n"
-                "## 预期创新与学术价值\n- B.\n\n"
-                "## 可证伪预测\n- C.\n\n"
-                "## 证据依据\n- D.\n\n"
-                "## 适用边界、风险与不确定性\n- F.\n\n"
-                "## 交给实验方案模块的下一步\n- Ready."
+                "# Final Idea\n\n"
+                "## Problem Anchor\n- Topic.\n\n"
+                "## Method Thesis\n- A.\n\n"
+                "## Dominant Contribution\n- B.\n\n"
+                "## Falsifiable Prediction\n- C.\n\n"
+                "## Evidence Basis\n- D.\n\n"
+                "## Scope Boundary\n- E.\n\n"
+                "## Open Risks\n- F.\n\n"
+                "## Handoff to Plan\n- Ready."
             )
         return content
 

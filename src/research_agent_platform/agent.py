@@ -5,14 +5,18 @@ import json
 import re
 import shutil
 import subprocess
-import time
 from dataclasses import replace
 from pathlib import Path
 
 from .connectors import ScholarSearchService, SeafileWorkspaceSync
 from .artifacts.store import ArtifactStore
 from .config import config
-from .context import discover_pdf_sources, resolve_local_research_context
+from .context import (
+    build_handoff_conflict_review,
+    discover_pdf_sources,
+    handoff_conflict_context,
+    resolve_local_research_context,
+)
 from .document_exports import (
     detect_write_formats,
     markdown_to_docx_bytes,
@@ -21,7 +25,16 @@ from .document_exports import (
 )
 from .graphs.runtime import LangGraphWorkflowRuntime
 from .graphs.workflows import StageDefinition, WorkflowDefinition, workflow_registry
-from .figure_pipeline import NoRenderableDataError, render_code_figure, select_data_sources
+from .diagram_pipeline import build_layout_plan, render_diagram
+from .edit_banana import convert_reference_to_drawio
+from .figure_contracts import (
+    build_figure_contract,
+    build_visual_style_spec,
+    contract_to_json,
+    resolve_figure_source_config,
+    style_to_json,
+)
+from .figure_pipeline import render_code_figure, validate_code_figure
 from .institutional_access import build_institutional_handoff, institutional_handoff_markdown
 from .literature_downloads import download_public_pdfs, download_public_pdfs_from_sources
 from .literature_sources import (
@@ -35,31 +48,44 @@ from .models import (
     ApprovalCheckpoint,
     ChatSession,
     CloudWorkspaceState,
+    FigureContract,
+    FigureDeliveryManifest,
     MessageRecord,
     ProgressEvent,
     TaskRun,
+    VisualStyleSpec,
     utc_now,
 )
 from .paper_pipeline import (
+    assess_writing_length,
+    build_writing_length_guidance,
+    build_writing_style_context,
+    build_fulltext_venue_style_card,
     build_paper_quality_reports,
     collect_paper_evidence,
-    extract_inline_write_material,
+    extract_writing_length_contract,
+    infer_source_section,
+    load_workspace_venue_style_card,
     paper_evidence_prompt,
     paper_evidence_to_json,
     resolve_write_source_config,
     select_venue_profile,
 )
+from .publication_contracts import ManuscriptContext, ParagraphContract, WritingPackage
+from .publication_quality import build_final_gate_report, build_review_package, build_revision_audit, build_revision_rationale, build_writing_context, find_manuscript, merge_role_findings, parse_role_findings, review_report_markdown, to_markdown
+from .evaluation import write_evaluation_report
 from .presentation import (
     SlideRender,
     assemble_mixed_deck,
     build_slide_prompt,
     collect_workspace_evidence,
     compose_slide_preview,
-    crop_slide_image,
+    fit_slide_image,
     enforce_presentation_page_mix,
     extract_presentation_assets,
     parse_slide_content,
     parse_speaker_notes,
+    PRESENTATION_IMAGE_SIZE,
     presentation_design_spec_to_json,
     presentation_assets_from_json,
     presentation_assets_to_json,
@@ -79,21 +105,29 @@ from .rebuttal import (
 )
 from .review_pipeline import (
     ReviewEvidenceError,
+    build_frozen_local_corpus_bundle,
     build_review_quality_reports,
     clean_review_topic,
     parse_review_queries,
+    query_effectiveness_payload,
+    review_directions_markdown,
     review_evidence_is_sufficient,
     review_quality_markdown,
 )
+from .reference_expansion import (
+    ReferenceExpansionResult,
+    expand_pdf_references,
+    reference_catalog_markdown,
+)
 from .router.intent import (
     RouteDecision,
-    explicit_route,
     is_approval_message,
     is_stop_message,
-    route_message,
 )
 from .state.store import StateStore
-from .upstream import configured_model_for_role, generate_image, generate_text
+from .upstream import generate_image, generate_text
+from .workspace_access import touch_workspace_access
+from .upstream import configured_model_for_role
 
 
 CLOUD_DELIVERY_SYSTEM_POLICY = (
@@ -103,6 +137,158 @@ CLOUD_DELIVERY_SYSTEM_POLICY = (
     "succeeds and the user-facing response includes the cloud preview/download URL. Never request, "
     "expose, or write cloud credentials into research artifacts."
 )
+
+
+PAPER_AGENT_STAGE_SKILLS: dict[str, tuple[str, ...]] = {
+    "research_brief": ("paper-init", "paper-literature-review"),
+    "literature_synthesis": ("paper-literature-review", "paper-style-learn", "paper-draft"),
+    "evidence_map": ("paper-literature-review", "paper-review"),
+    "research_gaps": ("paper-literature-review", "paper-review"),
+    "paper_evidence": ("paper-init",),
+    "paper_plan": ("paper-init", "paper-style-learn", "paper-draft"),
+    "narrative_report": ("paper-draft",),
+    "draft_sections": ("paper-draft",),
+    "paper_self_review": ("paper-review",),
+    "paper_revision": ("paper-revise",),
+    "rebuttal_intake": ("paper-init", "paper-review", "paper-revise-from-review"),
+    "review_to_paper_map": ("paper-review", "paper-revise-from-review"),
+    "response_strategy": ("paper-review", "paper-revise-from-review"),
+    "rebuttal_draft": ("paper-revise-from-review",),
+    "revision_plan": ("paper-revise-from-review",),
+    "revised_manuscript": ("paper-revise", "paper-revise-from-review"),
+    "revision_ledger": ("paper-review", "paper-revise-from-review"),
+}
+
+
+def _clean_generated_artifact(content: str) -> str:
+    cleaned = content.strip()
+    leakage_pattern = (
+        r"(?:assistant\s+to=|to=functions\.|<\|(?:assistant|tool|commentary|analysis)[^>]*\|>|"
+        r"^\s*(?:status|progress|正在|我(?:正在|先)|i['’]?m\s+(?:checking|looking|writing|reading|listing|"
+        r"locating|pulling|starting|finding|inspecting)|i['’]?ll\s+(?:check|inspect|draft))\b|"
+        r"(?:/Users/|/home/|agent-workspace/))"
+    )
+    if re.search(leakage_pattern, cleaned, re.IGNORECASE | re.MULTILINE) is None:
+        return cleaned
+    title = re.search(r"(?m)^#{1,6}\s+\S", cleaned)
+    if title is None:
+        return ""
+    candidate = cleaned[title.start() :].strip()
+    return "" if re.search(leakage_pattern, candidate, re.IGNORECASE | re.MULTILINE) else candidate
+
+
+def _is_plan_derived_section_request(objective: str) -> bool:
+    return bool(
+        re.search(r"研究计划|开题|proposal|plan", objective, re.I)
+        and not re.search(r"润色|polish|修改|revise|改写|rewrite", objective, re.I)
+        and _requested_write_sections(objective)
+    )
+
+
+def _strip_plan_abstract_evidence_markers(content: str) -> str:
+    marker = r"PE-[A-Z0-9]{10}"
+    parenthetical_markers = rf"\s*[（(]\s*{marker}(?:\s*[；;,，]\s*{marker})*\s*[）)]"
+    cleaned = re.sub(parenthetical_markers, "", content, flags=re.I)
+    cleaned = re.sub(rf"\s*\[{marker}\]", "", cleaned, flags=re.I)
+    return re.sub(r"[ \t]{2,}", " ", cleaned)
+
+
+def _requested_write_sections(objective: str) -> list[str]:
+    if re.search(r"全文|整篇|完整论文|full paper|complete manuscript", objective, re.I):
+        return []
+    labels = (
+        ("摘要", ("摘要", "abstract")),
+        ("关键词", ("关键词", "keywords")),
+        ("引言", ("引言", "introduction")),
+        ("文献综述", ("文献综述", "related work", "literature review")),
+        ("方法", ("研究方法", "方法", "methods", "methodology")),
+        ("结果", ("研究结果", "结果", "experiments", "results")),
+        ("讨论", ("讨论", "discussion")),
+        ("结论", ("结论", "conclusion")),
+    )
+    selected = [label for label, terms in labels if any(term.casefold() in objective.casefold() for term in terms)]
+    return selected if re.search(r"撰写|写作|写|起草|生成|润色|章节|section|chapter", objective, re.I) else []
+
+
+def _delivery_sections(task: TaskRun) -> tuple[list[str], dict[str, str | float] | None]:
+    """Resolve the requested section, keeping explicit intent ahead of source inference."""
+    requested = _requested_write_sections(task.objective)
+    if requested:
+        return requested, None
+    if re.search(r"全文|整篇|完整论文|full paper|complete manuscript", task.objective, re.I):
+        return [], None
+    if not re.search(r"润色|polish|修改|revise|改写|rewrite|这段|本段|这一节|本节", task.objective, re.I):
+        return [], None
+    source_refs = list(task.write_source.source_refs if task.write_source else [])
+    if not source_refs:
+        return [], None
+    inference = infer_source_section(Path(task.artifact_root), source_refs)
+    if inference["section"] and inference["confidence"] in {"high", "medium"}:
+        return [str(inference["section"])], inference
+    return [], inference
+
+
+def _retain_requested_write_sections(content: str, sections: list[str]) -> str:
+    if not sections:
+        return content
+    aliases = {
+        "摘要": ("摘要", "abstract"), "关键词": ("关键词", "keywords"), "引言": ("引言", "introduction"),
+        "文献综述": ("文献综述", "related work", "literature review"), "方法": ("研究方法", "方法", "methods", "methodology"),
+        "结果": ("研究结果", "结果", "experiments", "results"), "讨论": ("讨论", "discussion"), "结论": ("结论", "conclusion"),
+    }
+    kept = []
+    inline_keywords = re.search(
+        r"(?im)^\s*(?:\*\*)?(?:关键词|keywords?)(?:：|:)(?:\*\*)?\s*(?P<body>.+?)\s*$",
+        content,
+    )
+    for section in sections:
+        for heading in aliases[section]:
+            match = re.search(rf"(?ims)^#{{1,6}}\s*{re.escape(heading)}\s*$\n(?P<body>.*?)(?=^#{{1,6}}\s+|\Z)", content)
+            if match:
+                body = match.group("body").strip()
+                if section == "摘要" and inline_keywords:
+                    body = re.sub(
+                        r"(?im)^\s*(?:\*\*)?(?:关键词|keywords?)(?:：|:)(?:\*\*)?\s*.+?$",
+                        "",
+                        body,
+                    ).strip()
+                kept.append(f"## {section}\n{body}")
+                break
+        if section == "关键词" and not any(item.startswith("## 关键词\n") for item in kept) and inline_keywords:
+            kept.append(f"## 关键词\n{inline_keywords.group('body').strip()}")
+    return "\n\n".join(kept).strip() + ("\n" if kept else "") or content
+
+
+def _sanitize_review_deliverable(task: TaskRun, content: str) -> str:
+    """Prevent synthetic retrieval fixtures from becoming fake bibliography."""
+    search_path = Path(task.artifact_root) / "bib" / "LITERATURE_SEARCH.json"
+    if not search_path.exists():
+        return content
+    try:
+        payload = json.loads(search_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return content
+    papers = payload.get("papers") if isinstance(payload, dict) else None
+    if not isinstance(papers, list) or not papers:
+        return content
+    synthetic = any(
+        isinstance(paper, dict)
+        and (
+            "golden_fixture" in paper.get("sources", [])
+            or str(paper.get("url", "")).startswith("golden://")
+        )
+        for paper in papers
+    )
+    if not synthetic:
+        return content
+    match = re.search(r"(?ims)^#{1,6}\s+References\s*$", content)
+    if not match:
+        return content.replace("golden://", "")
+    return (
+        content[: match.start()].rstrip()
+        + "\n\n## References\n\n"
+        "- Stable record identifiers are retained inline; conventional bibliographic metadata was not supplied in the admitted package.\n"
+    )
 
 
 class ResearchAgentService:
@@ -120,6 +306,23 @@ class ResearchAgentService:
             cnki_api_key=config.cnki_api_key,
             cnki_auth_header=config.cnki_auth_header,
             cnki_auth_scheme=config.cnki_auth_scheme,
+            semantic_scholar_api_key=config.semantic_scholar_api_key,
+            crossref_enabled=config.crossref_enabled,
+            crossref_mailto=config.crossref_mailto,
+            dblp_enabled=config.dblp_enabled,
+            europepmc_enabled=config.europepmc_enabled,
+            europepmc_email=config.europepmc_email,
+            pmc_enabled=config.pmc_enabled,
+            ncbi_email=config.ncbi_email,
+            core_enabled=config.core_enabled,
+            core_api_key=config.core_api_key,
+            openaire_enabled=config.openaire_enabled,
+            openaire_api_key=config.openaire_api_key,
+            base_enabled=config.base_enabled,
+            zenodo_enabled=config.zenodo_enabled,
+            zenodo_access_token=config.zenodo_access_token,
+            hal_enabled=config.hal_enabled,
+            domain_map=config.scholar_domain_map,
             minimum_for_synthesis=config.review_minimum_sources,
             recommended_for_review=config.review_recommended_sources,
         )
@@ -142,8 +345,20 @@ class ResearchAgentService:
         self.workflows = workflow_registry()
         self.runtime = LangGraphWorkflowRuntime(self, self.workflows)
 
-    async def chat(self, session_id: str | None, message: str, user_id: str | None = None) -> dict:
-        session = await self._prepare_chat_session(session_id, message, user_id)
+    async def chat(
+        self,
+        session_id: str | None,
+        message: str,
+        user_id: str | None = None,
+        *,
+        sync_workspace: bool = True,
+    ) -> dict:
+        session = await self._prepare_chat_session(
+            session_id,
+            message,
+            user_id,
+            sync_workspace=sync_workspace,
+        )
         session_context = self._session_context(session)
 
         active_task = self.store.load_task(session.active_task_id) if session.active_task_id else None
@@ -154,9 +369,12 @@ class ResearchAgentService:
             if direct_reply is not None:
                 reply = await self._chat_reply(session)
             else:
-                route = await route_message(message, session_context)
+                # Every non-trivial turn passes through the LangGraph intent
+                # gate.  It decides whether this is plain text chat or an
+                # artifact workflow before any task is created.
+                route = await self.runtime.classify_intent(message, session_context)
                 if route is None:
-                    reply = await self._chat_reply(session)
+                    reply = await self._chat_reply(session, latest_message=message)
                 else:
                     reply = await self._start_task(session, message, route)
 
@@ -178,16 +396,9 @@ class ResearchAgentService:
         if active_task and active_task.status == "waiting_human":
             reply = await self._handle_waiting_task(session, active_task, message)
         else:
-            route = explicit_route(message)
+            route = await self.runtime.classify_intent(message, self._session_context(session))
             if route is None:
-                task = await self._create_chat_task(session, message, sync_workspace=sync_workspace)
-                reply = self._build_reply(
-                    task,
-                    text=(
-                        f"已接收问题，任务 `{task.task_id}` 正在后台处理。"
-                        "路由、模型调用和回答完成状态将通过 SSE 推送。"
-                    ),
-                )
+                reply = await self._chat_reply(session, latest_message=message)
             else:
                 task = await self._create_task(session, message, route, sync_workspace=sync_workspace)
                 if task.status == "failed":
@@ -195,7 +406,7 @@ class ResearchAgentService:
                 else:
                     reply = self._build_reply(
                         task,
-                        text="已经接收到您的请求，后台正在工作，请稍后...",
+                        text="已收到指令，正在执行... （这可能需要几分钟的时间，完成后会直接给你访问工作空间的链接）",
                     )
         latest_session = self.store.load_session(session.session_id) or session
         latest_session.history.append(MessageRecord(role="assistant", content=reply["text"]))
@@ -212,12 +423,19 @@ class ResearchAgentService:
         session_context = self._session_context(session)
 
         self._log_progress(task, "正在分析请求类型", kind="router")
+        workspace_reply = self._workspace_info_reply(session, task.objective)
         direct_reply = self._direct_chat_response("".join(task.objective.lower().split()))
-        route = None if direct_reply is not None else await route_message(task.objective, session_context)
+        if workspace_reply is not None:
+            direct_reply = workspace_reply
+        route = None if direct_reply is not None else await self.runtime.classify_intent(
+            task.objective, session_context
+        )
         if route is not None:
             task.command = route.command
             task.route_source = route.source
             task.workflow_title = self.workflows[route.command].title
+            task.workflow_mode = route.workflow_mode
+            task.skill_bundle = list(route.skill_bundle)
             task.objective = self._strip_command(task.objective, route.command, route.command)
             self._configure_task_inputs(task, session)
             if task.status == "failed":
@@ -256,6 +474,13 @@ class ResearchAgentService:
         if task.command == "/chat":
             return await self.execute_chat_task(task_id)
         workflow = self.workflows[task.command]
+        if task.command == "/rebuttal" and task.workflow_mode == "manuscript_diagnosis":
+            result = await self._execute_manuscript_diagnosis(task, workflow)
+            latest_session = self.store.load_session(task.session_id)
+            if latest_session:
+                latest_session.history.append(MessageRecord(role="assistant", content=result["text"]))
+                self.store.save_session(latest_session)
+            return result
         try:
             result = await self.runtime.start_task(task, workflow)
         except ReviewEvidenceError as exc:
@@ -263,6 +488,11 @@ class ResearchAgentService:
             failed_task = self.store.load_task(task.task_id) or task
             await self.sync_task_workspace(failed_task)
             result = self._build_reply(failed_task, text=str(exc))
+        except Exception as exc:
+            self.record_task_failure(task.task_id, exc)
+            failed_task = self.store.load_task(task.task_id) or task
+            await self.sync_task_workspace(failed_task)
+            result = self._build_reply(failed_task, text=failed_task.error or failed_task.summary)
         latest_session = self.store.load_session(task.session_id)
         if latest_session:
             latest_session.history.append(MessageRecord(role="assistant", content=result["text"]))
@@ -273,6 +503,195 @@ class ResearchAgentService:
             self.store.save_task(latest_task)
         return result
 
+    async def _execute_manuscript_diagnosis(self, task: TaskRun, workflow: WorkflowDefinition) -> dict:
+        workspace_root = Path(task.artifact_root)
+        manuscript_path, manuscript = find_manuscript(workspace_root)
+        document_type = str(build_writing_context(task.objective, [], {}).get("document_type", "journal_article"))
+        review_payload = build_review_package(
+            manuscript_path, manuscript, workspace_root, document_type=document_type
+        )
+        task.current_stage_name = "simulated_peer_review"
+        self._log_progress(task, "阶段开始: Simulated Peer Review")
+        role_reviews = await self._run_role_reviews(task, manuscript_path, manuscript)
+        role_findings = {
+            role: parse_role_findings(role, content)
+            for role, content in role_reviews.items()
+        }
+        role_merge = merge_role_findings(role_findings)
+        unavailable_roles = [
+            role
+            for role, content in role_reviews.items()
+            if self._role_review_status(content) == "unavailable"
+        ]
+        if unavailable_roles:
+            role_merge["review_status"] = "needs_attention"
+            role_merge["unavailable_roles"] = unavailable_roles
+            review_payload["review_status"] = "needs_attention"
+            review_payload["unavailable_roles"] = unavailable_roles
+            review_payload.setdefault("limitations", []).append(
+                "One or more isolated reviewer calls were unavailable; rerun the simulated review before relying on it."
+            )
+        else:
+            role_merge["review_status"] = "available"
+            review_payload["review_status"] = "available"
+        review_payload["role_review_merge"] = role_merge
+        review_report = await self._merge_role_reviews(review_payload, role_reviews, role_merge)
+        role_artifacts = [
+            self._write_text(
+                task,
+                f"rebuttal/reviews/{role}.md",
+                content,
+                kind="review",
+                description=f"Independent {role} simulated-review analysis.",
+            )
+            for role, content in role_reviews.items()
+        ]
+        role_manifest = {
+            "schema_version": "role-review-manifest/v1",
+            "configuration": "same-model independent role reviews; roles do not receive one another's output",
+            "roles": list(role_reviews),
+            "manuscript_path": manuscript_path,
+            "finding_contract": "JSON only; unstructured reviewer prose is retained as raw output but excluded from the structured merge.",
+        }
+        task.artifacts.extend(
+            [
+                self._write_text(
+                    task,
+                    "rebuttal/reviews/REVIEW_PACKAGE.json",
+                    json.dumps(review_payload, ensure_ascii=False, indent=2),
+                    kind="review",
+                    description="Structured simulated peer-review package.",
+                ),
+                self._write_text(
+                    task,
+                    "rebuttal/REVIEW_REPORT.md",
+                    review_report,
+                    kind="report",
+                    description="Author-facing simulated peer-review report.",
+                ),
+                self._write_text(
+                    task,
+                    "rebuttal/reviews/ROLE_REVIEW_MANIFEST.json",
+                    json.dumps(role_manifest, ensure_ascii=False, indent=2),
+                    kind="manifest",
+                    description="Role-isolation and review-configuration record.",
+                ),
+                self._write_text(
+                    task,
+                    "rebuttal/reviews/ROLE_FINDINGS.json",
+                    json.dumps(
+                        {
+                            "schema_version": "role-review-findings/v1",
+                            "raw_findings": role_findings,
+                            "merged": role_merge,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    kind="manifest",
+                    description="Structured isolated role findings and deterministic meta-review merge.",
+                ),
+                *role_artifacts,
+            ]
+        )
+        self.artifacts._write_manifest_for_root(workspace_root)
+        self._mark_task_completed(task, workflow)
+        session = self.store.load_session(task.session_id)
+        if session:
+            session.active_task_id = None
+            self.store.save_session(session)
+        await self.sync_task_workspace(task)
+        return self._build_reply(task, text=f"{workflow.title} 已完成。审稿意见已整理为作者可执行的模拟审稿报告。")
+
+    async def _run_role_reviews(self, task: TaskRun, manuscript_path: str, manuscript: str) -> dict[str, str]:
+        roles = {
+            "editor": "Assess contribution, scope, structure, and submission-level priorities.",
+            "domain": "Assess domain framing, terminology, and discipline-specific claim boundaries.",
+            "methods": "Assess design, analysis, reproducibility, and whether reported methods support the claims.",
+            "evidence": "Assess citation/evidence alignment, quantitative support, and missing provenance.",
+            "adversarial": "Look for overclaiming, alternative explanations, hidden assumptions, and unsupported generalisation.",
+            "language-format": "Assess clarity, paragraph logic, language precision, and document-format fit.",
+        }
+        frozen = manuscript[:24000]
+
+        async def review(role: str, instruction: str) -> tuple[str, str]:
+            try:
+                content = await generate_text(
+                    system_prompt=(
+                        f"You are the {role} reviewer in a same-model, role-isolated simulated peer review. "
+                        "You receive only the frozen manuscript below. Do not claim editorial authority, new experiments, "
+                        "or facts absent from the manuscript. Return JSON only: {\"findings\":[{\"location\":string,\"category\":string,"
+                        "\"severity\":\"major\"|\"minor\",\"problem\":string,\"impact\":string,\"recommended_action\":string,"
+                        "\"evidence_ids\":[string]}]}. Return an empty findings array when there is no supported finding."
+                    ),
+                    user_prompt=f"Role focus: {instruction}\n\nManuscript path: {manuscript_path}\n\nFrozen manuscript:\n{frozen}",
+                    model=configured_model_for_role("review"),
+                    temperature=0,
+                )
+                content = content.strip()
+                if not content or self._role_review_status(content) == "unavailable":
+                    return role, json.dumps(
+                        {"status": "unavailable", "error_type": "InvalidReviewerResponse", "findings": []}
+                    )
+                return role, content
+            except Exception as exc:
+                return role, json.dumps(
+                    {"status": "unavailable", "error_type": type(exc).__name__, "findings": []}
+                )
+
+        results = await asyncio.gather(*(review(role, instruction) for role, instruction in roles.items()))
+        return dict(results)
+
+    @staticmethod
+    def _role_review_status(content: str) -> str:
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return "unavailable"
+        if not isinstance(payload, dict) or not isinstance(payload.get("findings"), list):
+            return "unavailable"
+        return "unavailable" if payload.get("status") == "unavailable" else "available"
+
+    async def _merge_role_reviews(self, review_payload: dict, role_reviews: dict[str, str], role_merge: dict) -> str:
+        if role_merge.get("review_status") == "needs_attention":
+            fallback = dict(review_payload)
+            if role_merge.get("findings"):
+                fallback["findings"] = role_merge["findings"]
+            fallback["decision"] = "REVIEW_UNAVAILABLE"
+            return review_report_markdown(fallback)
+        role_context = "\n\n".join(f"## {role}\n{content[:5000]}" for role, content in role_reviews.items())
+        try:
+            content = await generate_text(
+                system_prompt=(
+                    "You are a meta-reviewer. Merge isolated role reviews without inventing facts or claiming an editorial decision. "
+                    "Deduplicate only clearly identical concerns, retain disagreement, and return a concise author-facing markdown report "
+                    "beginning with '# Simulated Peer Review'."
+                ),
+                user_prompt=(
+                    f"Deterministic findings:\n{json.dumps(review_payload, ensure_ascii=False)}\n\n"
+                    f"Structured role meta-review:\n{json.dumps(role_merge, ensure_ascii=False)}\n\n"
+                    f"Raw role outputs:\n{role_context}"
+                ),
+                model=configured_model_for_role("meta_review"),
+                temperature=0,
+            )
+            if content.lstrip().startswith("# Simulated Peer Review"):
+                return content.strip() + "\n"
+        except Exception as exc:
+            role_merge["review_status"] = "needs_attention"
+            role_merge["meta_review_status"] = "unavailable"
+            role_merge["meta_review_error_type"] = type(exc).__name__
+            review_payload["review_status"] = "needs_attention"
+            review_payload.setdefault("limitations", []).append(
+                "The author-facing meta-review call was unavailable; deterministic findings were retained."
+            )
+        fallback = dict(review_payload)
+        if role_merge.get("findings"):
+            fallback["findings"] = role_merge["findings"]
+        if role_merge.get("review_status") == "needs_attention":
+            fallback["decision"] = "REVIEW_UNAVAILABLE"
+        return review_report_markdown(fallback)
+
     async def _prepare_chat_session(
         self, session_id: str | None, message: str, user_id: str | None, *, sync_workspace: bool = True
     ) -> ChatSession:
@@ -282,8 +701,22 @@ class ResearchAgentService:
             session_id=session.session_id,
         )
         session.workspace_root = str(workspace_root.resolve())
-        if sync_workspace and config.cloud_sync_enabled and session.cloud_workspace.status != "synced":
-            await self.sync_session_workspace(session)
+        touch_workspace_access(workspace_root)
+        if config.cloud_sync_enabled and session.cloud_workspace.status != "synced":
+            if sync_workspace:
+                try:
+                    await asyncio.wait_for(
+                        self.sync_session_workspace(session),
+                        timeout=max(1.0, float(config.session_workspace_sync_timeout_seconds)),
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    # Chat must remain available while best-effort cloud
+                    # delivery continues through the per-session scheduler.
+                    self._schedule_cloud_sync(session.session_id)
+            else:
+                # Text/OpenAI-compatible clients do not wait on Seafile, but
+                # opening a session must still start the actual handoff.
+                self._schedule_cloud_sync(session.session_id)
         session.history.append(MessageRecord(role="user", content=message))
         self.store.save_session(session)
         return session
@@ -369,7 +802,22 @@ class ResearchAgentService:
 
     async def _chat_reply(self, session: ChatSession, latest_message: str | None = None) -> dict:
         latest_message = latest_message if latest_message is not None else session.history[-1].content if session.history else ""
-        direct_reply = self._direct_chat_response(latest_message)
+        if (
+            self._is_workspace_question("".join(latest_message.lower().split()))
+            and config.cloud_sync_enabled
+            and session.cloud_workspace.status != "synced"
+        ):
+            try:
+                await asyncio.wait_for(
+                    self.sync_session_workspace(session),
+                    timeout=max(1.0, float(config.session_workspace_sync_timeout_seconds)),
+                )
+            except (asyncio.TimeoutError, Exception):
+                self._schedule_cloud_sync(session.session_id)
+                session = self.store.load_session(session.session_id) or session
+        direct_reply = self._workspace_info_reply(session, latest_message)
+        if direct_reply is None:
+            direct_reply = self._direct_chat_response(latest_message)
         if direct_reply:
             return {
                 "text": direct_reply,
@@ -406,6 +854,8 @@ class ResearchAgentService:
             "idea discovery, experiment planning, paper drafting, rebuttal, and research memory. Mention commands such as "
             "/review, /idea, /plan, /code, /write, /rebuttal, /fig, /present, and /wiki when relevant. "
             "Do not describe yourself as a generic assistant. Do not create a workflow task unless the user explicitly requests one. "
+            "When the user asks for the current Tsinghua cloud workspace link, answer that lookup directly; "
+            "do not tell them to send a public share link or list supported file types unless they asked about that. "
             f"{CLOUD_DELIVERY_SYSTEM_POLICY}"
         )
         if session_context:
@@ -585,6 +1035,11 @@ class ResearchAgentService:
 
     def _direct_chat_response(self, message: str) -> str | None:
         normalized = "".join(message.lower().split())
+        if self._is_workspace_question(normalized):
+            return (
+                "工作区是当前会话专属的研究文件夹，用来保存上传资料、生成的论文/图表/PPT和过程记录。"
+                "继续在当前会话提问会复用同一个工作区；点击“新会话”才会创建新的独立工作区。"
+            )
         if self._is_greeting_message(normalized):
             return (
                 "你好，我是科研智能体 Research Agent。"
@@ -605,6 +1060,93 @@ class ResearchAgentService:
                 "/write 产出论文草稿，/rebuttal 处理审稿意见，/wiki 回看本地研究记忆。"
             )
         return None
+
+    def _is_workspace_question(self, normalized_message: str) -> bool:
+        return any(
+            phrase in normalized_message
+            for phrase in (
+                "工作区是什么",
+                "什么是工作区",
+                "工作区链接",
+                "工作区在哪",
+                "工作区哪里",
+                "工作空间链接",
+                "工作空间在哪",
+                "清华网盘链接",
+                "清华网盘工作区",
+                "清华云盘链接",
+                "网盘链接是什么",
+                "网盘链接在哪",
+                "workspace是什么",
+                "workspace链接",
+                "whatistheworkspace",
+            )
+        )
+
+    def _is_cloud_workspace_link_question(self, normalized_message: str) -> bool:
+        """Recognize a lookup for this session's Tsinghua cloud URL."""
+        if not normalized_message:
+            return False
+        lookup_terms = (
+            "是什么",
+            "是啥",
+            "在哪",
+            "哪里",
+            "哪儿",
+            "给我",
+            "告诉我",
+            "查看",
+            "获取",
+            "我的",
+            "whatismy",
+            "whereismy",
+        )
+        cloud_terms = (
+            "清华网盘链接",
+            "清华网盘工作区链接",
+            "清华云盘链接",
+            "网盘工作区链接",
+            "网盘链接",
+        )
+        # A bare public-share-link input must still reach the normal source or
+        # download workflow; only lookup-style language is handled here.
+        return any(term in normalized_message for term in cloud_terms) and any(
+            term in normalized_message for term in lookup_terms
+        )
+
+    def _workspace_info_reply(self, session: ChatSession, message: str) -> str | None:
+        normalized = "".join(message.lower().split())
+        if not self._is_workspace_question(normalized):
+            return None
+        if self._is_cloud_workspace_link_question(normalized):
+            cloud = session.cloud_workspace
+            cloud_url = self._cloud_workspace_url(cloud)
+            if cloud.status == "synced" and cloud_url:
+                return f"你的清华网盘工作区链接：{cloud_url}"
+            if cloud.status in {"pending", "error"}:
+                return "你的清华网盘工作区链接正在生成中，完成后会自动显示在当前会话。"
+            if cloud.status == "disabled":
+                return "当前会话的清华网盘同步未启用，暂时没有可用链接。"
+            return "你的清华网盘工作区链接正在生成中，完成后会自动显示在当前会话。"
+        lines = [
+            "工作区是当前会话专属的研究文件夹，用来保存上传资料、生成的论文/图表/PPT和过程记录。",
+            "继续在当前会话提问会复用同一个工作区；点击“新会话”才会创建新的独立工作区。",
+        ]
+        lines.append(
+            f"当前会话：`{session.session_id}`；本地文件会保存在该会话的专属工作区，"
+            "服务器本地路径不会通过聊天接口暴露。"
+        )
+        cloud = session.cloud_workspace
+        cloud_url = self._cloud_workspace_url(cloud)
+        if cloud.status == "synced" and cloud_url:
+            lines.append(f"清华网盘工作区链接：{cloud_url}")
+        elif cloud.status == "synced" and cloud.error:
+            lines.append(f"清华网盘状态：{cloud.error}")
+        elif cloud.status in {"error", "pending"}:
+            lines.append("清华网盘工作区链接正在生成中；本地工作区已创建，完成后会在当前会话返回真实链接。")
+        elif cloud.status == "disabled":
+            lines.append("清华网盘同步未启用；本地工作区仍可继续使用。")
+        return "\n".join(lines)
 
     def _is_identity_question(self, normalized_message: str) -> bool:
         if not normalized_message:
@@ -701,6 +1243,8 @@ class ResearchAgentService:
             objective=self._strip_command(message, workflow.command, route.command),
             route_source=route.source,
             workflow_title=workflow.title,
+            workflow_mode=route.workflow_mode,
+            skill_bundle=list(route.skill_bundle),
         )
         task_root = self.artifacts.task_root(
             task.task_id,
@@ -733,35 +1277,18 @@ class ResearchAgentService:
                 source_limit=config.presentation_source_limit,
             )
         if task.command == "/write":
-            inline_material = extract_inline_write_material(task.objective)
-            if inline_material:
-                artifact = self._write_text(
-                    task,
-                    "Content/USER_PROVIDED_MATERIAL.md",
-                    "# User-provided writing material\n\n"
-                    "This file records factual material supplied directly in the current message. "
-                    "It is not an external publication and must not be cited as one.\n\n"
-                    "## Material\n\n"
-                    f"{inline_material}\n",
-                    kind="note",
-                    description="Writing material pasted directly by the user in the current request.",
-                )
-                self._upsert_task_artifact(task, artifact)
             task.write_source = resolve_write_source_config(
                 task.objective,
                 root,
                 session.upload_batches,
                 source_limit=config.write_source_limit,
             )
-            if inline_material:
-                # A directly supplied passage is the default source boundary for
-                # this request.  Older session files are only included when the
-                # user asks for them explicitly with a source-scope option.
-                task.write_source.source_refs = ["Content/USER_PROVIDED_MATERIAL.md"]
-                task.write_source.resolved_scope = "selected"
-                task.write_source.selection_reason = (
-                    "用户在当前消息中直接提供了可追溯的写作材料；本次仅以该材料作为事实边界。"
-                )
+        if task.command == "/fig":
+            task.figure_source = resolve_figure_source_config(
+                task.objective,
+                root,
+                session.upload_batches,
+            )
         if task.command == "/download":
             task.download_source = resolve_download_source_config(
                 task.objective,
@@ -769,7 +1296,7 @@ class ResearchAgentService:
                 session.upload_batches,
                 source_limit=config.review_download_limit,
             )
-        if task.command == "/rebuttal":
+        if task.command == "/rebuttal" and task.workflow_mode == "rebuttal_revision":
             try:
                 task.rebuttal_source = resolve_rebuttal_source_config(
                 task.objective,
@@ -909,8 +1436,6 @@ class ResearchAgentService:
 
         if task.command == "/idea":
             await self._write_research_contract(task)
-        if task.command == "/fig":
-            task.artifacts.extend(await self._write_figure_delivery_artifacts(task))
         if task.command == "/write":
             task.artifacts.extend(await self._write_delivery_artifacts(task))
         if task.command == "/rebuttal":
@@ -942,7 +1467,173 @@ class ResearchAgentService:
     ):
         support_artifacts, support_context = await self._prepare_stage_support(task, stage)
         for artifact in support_artifacts:
-            self._upsert_task_artifact(task, artifact)
+            task.artifacts.append(artifact)
+        if (
+            task.command == "/write"
+            and stage.name == "paper_self_review"
+            and _is_plan_derived_section_request(task.objective)
+        ):
+            draft = self._artifact_text(task, "paper/PAPER_DRAFT.md")
+            findings = []
+            requested_sections, _ = _delivery_sections(task)
+            for section in requested_sections:
+                if f"## {section}" not in draft:
+                    findings.append(f"{section} 标题缺失，终稿必须补齐。")
+            if re.search(r"证明了|显著提高|实验结果表明|研究发现", draft):
+                findings.append("发现可能将计划性材料写成既有结果，终稿必须改为前瞻表述。")
+            report = "# 计划派生章节轻量终检\n\n" + (
+                "- " + "\n- ".join(findings) if findings else "- 草稿满足目标章节与前瞻写作的基础合同；终稿仅保留用户请求的章节。"
+            ) + "\n"
+            return self._write_text(
+                task,
+                stage.artifact_path,
+                report,
+                kind=stage.artifact_kind,
+                description="Deterministic proposed-study abstract review.",
+            )
+        if stage.name == "final_quality_gate":
+            manuscript_path, manuscript = find_manuscript(Path(task.artifact_root))
+            document_type = str(build_writing_context(task.objective, [], {}).get("document_type", "journal_article"))
+            payload = build_final_gate_report(
+                manuscript_path,
+                manuscript,
+                Path(task.artifact_root),
+                document_type=document_type,
+            )
+            title = "Publication Quality Gate Report"
+            artifact = self._write_text(
+                task,
+                stage.artifact_path,
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                kind=stage.artifact_kind,
+                description=title,
+            )
+            task.artifacts.append(
+                self._write_text(
+                    task,
+                    stage.artifact_path.replace(".json", ".md"),
+                    to_markdown(title, payload),
+                    kind="report",
+                    description=f"Human-readable {title.lower()}.",
+                )
+            )
+            review_payload = build_review_package(
+                manuscript_path,
+                manuscript,
+                Path(task.artifact_root),
+                document_type=document_type,
+            )
+            task.artifacts.extend(
+                [
+                    self._write_text(
+                        task,
+                        "paper/FINAL_REVIEW_PACKAGE.json",
+                        json.dumps(review_payload, ensure_ascii=False, indent=2),
+                        kind="review",
+                        description="Internal structured diagnostic review of the final manuscript.",
+                    ),
+                    self._write_text(
+                        task,
+                        "paper/FINAL_REVIEW_PACKAGE.md",
+                        to_markdown("Final Diagnostic Review Package", review_payload),
+                        kind="report",
+                        description="Human-readable internal diagnostic review of the final manuscript.",
+                    ),
+                ]
+            )
+            review_path = Path(task.artifact_root) / "rebuttal/reviews/REVIEW_PACKAGE.json"
+            if review_path.exists():
+                review_payload = json.loads(review_path.read_text(encoding="utf-8"))
+            evaluation_path = write_evaluation_report(
+                Path(task.artifact_root),
+                review_payload,
+                payload,
+                manuscript,
+                discipline=build_writing_context(task.objective, [], {}).get("discipline", ""),
+            )
+            task.artifacts.append(
+                self._write_text(
+                    task,
+                    evaluation_path.relative_to(task.artifact_root).as_posix(),
+                    evaluation_path.read_text(encoding="utf-8"),
+                    kind="review",
+                    description="Deterministic writing-quality rubric evaluation.",
+                )
+            )
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
+        if task.command == "/fig" and stage.name == "figure_contract":
+            session = self.store.load_session(task.session_id)
+            source_config = resolve_figure_source_config(
+                task.objective,
+                Path(task.artifact_root),
+                session.upload_batches if session else (),
+            )
+            task.figure_source = source_config
+            contract = build_figure_contract(task.objective, source_config)
+            if contract.kind == "reference_reproduction" and not config.edit_banana_base_url:
+                contract.decision_required = True
+                contract.decision_question = (
+                    "参考图拆解需要配置独立 Edit Banana 服务（EDIT_BANANA_BASE_URL）；"
+                    "当前未配置，系统不会伪造可编辑复刻结果。"
+                )
+            artifact = self._write_text(
+                task,
+                stage.artifact_path,
+                contract_to_json(contract),
+                kind=stage.artifact_kind,
+                description=f"{workflow.title} / {stage.title}",
+            )
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
+        if task.command == "/fig" and stage.name == "figure_design":
+            contract = FigureContract.model_validate_json(
+                self._artifact_text(task, "figures/FIGURE_CONTRACT.json")
+            )
+            style = build_visual_style_spec(contract)
+            layout_plan = build_layout_plan(contract)
+            layout_artifact = self._write_text(
+                task,
+                "figures/LAYOUT_PLAN.json",
+                json.dumps(layout_plan.model_dump(), ensure_ascii=False, indent=2),
+                kind="plan",
+                description="Renderer-neutral reading order, grouping, ports, and topology before coordinates.",
+            )
+            task.artifacts.append(layout_artifact)
+            artifact = self._write_text(
+                task,
+                stage.artifact_path,
+                style_to_json(style),
+                kind=stage.artifact_kind,
+                description=f"{workflow.title} / {stage.title}",
+            )
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
+        if task.command == "/fig" and stage.name == "figure_render_and_qa":
+            rendered_artifacts = await self._write_figure_delivery_artifacts(task)
+            qa_artifact = next(
+                artifact
+                for artifact in rendered_artifacts
+                if artifact.relative_path == "figures/generated/FIGURE_QA.json"
+            )
+            for artifact in rendered_artifacts:
+                if artifact.relative_path not in {
+                    qa_artifact.relative_path,
+                    "figures/generated/FIGURE_DELIVERY.json",
+                }:
+                    task.artifacts.append(artifact)
+            return qa_artifact
+        if task.command == "/fig" and stage.name == "figure_delivery":
+            manifest_path = Path(task.artifact_root, "figures/generated/FIGURE_DELIVERY.json")
+            if not manifest_path.is_file():
+                raise RuntimeError("Figure delivery manifest was not produced by render and QA stage")
+            return self._write_text(
+                task,
+                stage.artifact_path,
+                manifest_path.read_text(encoding="utf-8"),
+                kind=stage.artifact_kind,
+                description=f"{workflow.title} / {stage.title}",
+            )
         if task.command == "/rebuttal" and stage.name == "rebuttal_intake":
             if task.rebuttal_source is None:
                 raise RebuttalInputError("/rebuttal input SourceSet is missing.")
@@ -987,51 +1678,73 @@ class ResearchAgentService:
         if support_context:
             prompt["user"] = support_context + "\n" + prompt["user"]
         self._log_progress(task, f"正在调用上游模型生成阶段内容: {stage.title}", kind="model")
-        selected_model = configured_model_for_role(stage.model_role)
-        fallback_model = config.upstream_model or None
-        fallback_used = False
-        started = time.monotonic()
-        try:
-            content = await generate_text(
-                system_prompt=prompt["system"],
-                user_prompt=prompt["user"],
-                model=selected_model,
-                temperature=0.35,
+        content = await generate_text(
+            system_prompt=prompt["system"],
+            user_prompt=prompt["user"],
+            model=configured_model_for_role(stage.model_role),
+            temperature=0.35,
+        )
+        content = _clean_generated_artifact(content)
+        if task.command == "/review" and stage.name == "literature_synthesis":
+            content = _sanitize_review_deliverable(task, content)
+        if task.command == "/write" and stage.name in {"draft_sections", "paper_revision"} and _is_plan_derived_section_request(task.objective):
+            requested_sections, _ = _delivery_sections(task)
+            content = _strip_plan_abstract_evidence_markers(
+                _retain_requested_write_sections(content, requested_sections)
             )
-        except Exception:
+        elif task.command == "/write" and stage.name in {"draft_sections", "paper_revision"}:
+            requested_sections, _ = _delivery_sections(task)
+            content = _retain_requested_write_sections(content, requested_sections)
+        length_contract = extract_writing_length_contract(task.objective)
+        for repair_attempt in range(1):
             if (
-                task.command != "/idea"
-                or not fallback_model
-                or not selected_model
-                or fallback_model == selected_model
+                not length_contract
+                or stage.name not in {"literature_synthesis", "draft_sections", "paper_revision"}
+                or assess_writing_length(content, length_contract)["valid"]
             ):
-                raise
-            fallback_used = True
+                break
+            length = assess_writing_length(content, length_contract)
             self._log_progress(
                 task,
-                f"阶段模型不可用，回退到默认模型: {stage.title}",
-                kind="model",
+                f"主交付件长度为 {length['count']} {length['unit']}，正在按交付合同第 {repair_attempt + 1} 次修订。",
+                kind="quality",
             )
-            content = await generate_text(
-                system_prompt=prompt["system"],
-                user_prompt=prompt["user"],
-                model=fallback_model,
-                temperature=0.35,
+            content = _clean_generated_artifact(
+                await generate_text(
+                    system_prompt=(
+                        "You are a careful academic editor. Preserve all supplied evidence, citations, "
+                        "uncertainty statements, and required headings while repairing only the delivery length."
+                    ),
+                    user_prompt=(
+                        "Revise the following academic deliverable into the requested length range. Return the complete "
+                        "revised deliverable only. Do not add sources, facts, methods, or claims. Do not remove required "
+                        "sections, stable citation IDs, evidence limitations, or uncertainty boundaries. Remove repetition "
+                        "and compress tables only when every material condition remains visible.\n\n"
+                        f"Required length: {length_contract['minimum']}–{length_contract['maximum']} "
+                        f"{length_contract['unit']}. Aim for {int(length_contract['maximum']) - 50} "
+                        f"{length_contract['unit']} to leave a verification margin. Current length: "
+                        f"{length['count']} {length['unit']}.\n\n"
+                        f"Deliverable to revise:\n{content}"
+                    ),
+                    temperature=0.2,
+                )
             )
+            if task.command == "/review" and stage.name == "literature_synthesis":
+                content = _sanitize_review_deliverable(task, content)
+        if not content.strip() and task.command == "/review" and stage.name == "evidence_map":
+            content = self._deterministic_review_evidence_map(task)
         if not content.strip():
             raise RuntimeError(f"Empty content from upstream for stage {stage.name}")
-        content = self._normalize_generated_markdown(content, stage.required_sections)
-        evidence_validation: dict | None = None
         if task.command == "/idea" and stage.name == "final_idea":
-            content, evidence_validation = self._validate_idea_evidence(task, content)
-        if task.command == "/idea":
-            self._record_idea_trace(
-                task,
-                stage,
-                selected_model=fallback_model if fallback_used else selected_model,
-                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
-                fallback_used=fallback_used,
-                evidence_validation=evidence_validation,
+            content, novelty_gate = self._apply_idea_novelty_gate(task, content)
+            task.artifacts.append(
+                self._write_text(
+                    task,
+                    "Content/IDEA_NOVELTY_GATE.json",
+                    json.dumps(novelty_gate, ensure_ascii=False, indent=2) + "\n",
+                    kind="manifest",
+                    description="Deterministic evidence-coverage and novelty gate for the final Idea.",
+                )
             )
         self._log_progress(task, f"上游模型已返回阶段内容: {stage.title}", kind="model")
         artifact = self._write_text(
@@ -1043,6 +1756,35 @@ class ResearchAgentService:
         )
         self.artifacts._write_manifest_for_root(Path(task.artifact_root))
         return artifact
+
+    def _deterministic_review_evidence_map(self, task: TaskRun) -> str:
+        search_path = Path(task.artifact_root) / "bib" / "LITERATURE_SEARCH.json"
+        try:
+            payload = json.loads(search_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        records = payload.get("records") or payload.get("admitted") or []
+        source_rows = []
+        for item in records[:12]:
+            if not isinstance(item, dict):
+                continue
+            identifier = str(item.get("stable_id") or item.get("id") or item.get("title") or "admitted source")
+            title = str(item.get("title") or identifier)
+            source_rows.append(f"| {title} | {identifier} | Metadata/full-text availability is recorded in `LITERATURE_SEARCH.json`. |")
+        if not source_rows:
+            source_rows.append("| No model-generated claim | See `LITERATURE_SEARCH.json` and `LITERATURE_REVIEW.md`. | Evidence-map generation returned empty output. |")
+        return (
+            "# Evidence Map\n\n"
+            "## Claim Evidence Matrix\n\n"
+            "| Claim or question | Source pointer | Boundary |\n|---|---|---|\n"
+            + "\n".join(source_rows)
+            + "\n\n## Methods\n\nSee source-level metadata; no additional methods are inferred.\n\n"
+            "## Datasets\n\nSee source-level metadata; do not infer dataset comparability.\n\n"
+            "## Baselines\n\nSee source-level metadata; do not infer baseline equivalence.\n\n"
+            "## Metrics\n\nSee source-level metadata; report split and compute conditions where available.\n\n"
+            "## Contradictory Evidence\n\nPreserve conflicts identified in `LITERATURE_REVIEW.md`; no conflict is resolved by this fallback.\n\n"
+            "## Confidence and Source Pointers\n\nThis fallback is a traceability index, not a new synthesis. Confidence remains bounded by the admitted records and full-text availability.\n"
+        )
 
     def _stage_requires_checkpoint(self, task: TaskRun, stage: StageDefinition) -> bool:
         if not config.enable_hitl or not stage.hitl:
@@ -1057,6 +1799,14 @@ class ResearchAgentService:
         )
         if any(re.search(pattern, objective, re.I) for pattern in explicit_review):
             return True
+        if task.command == "/fig" and stage.name == "figure_contract":
+            try:
+                contract = FigureContract.model_validate_json(
+                    self._artifact_text(task, "figures/FIGURE_CONTRACT.json")
+                )
+            except (ValueError, json.JSONDecodeError):
+                return True
+            return contract.decision_required
         if not stage.hitl:
             return False
         return bool(self._blocking_decision_section(task, stage))
@@ -1122,10 +1872,16 @@ class ResearchAgentService:
                 support_context_parts.append(rebuttal_context)
             return support_artifacts, "\n\n".join(support_context_parts)
         if task.command == "/write":
-            write_artifacts, write_context = self._prepare_write_support(task)
+            write_artifacts, write_context = await self._prepare_write_support(task)
             support_artifacts.extend(write_artifacts)
             if write_context:
                 support_context_parts.append(write_context)
+            return support_artifacts, "\n\n".join(support_context_parts)
+        if task.command == "/plan":
+            plan_artifacts, plan_context = self._prepare_plan_support(task)
+            support_artifacts.extend(plan_artifacts)
+            if plan_context:
+                support_context_parts.append(plan_context)
             return support_artifacts, "\n\n".join(support_context_parts)
         if task.command == "/download":
             download_artifacts, download_context = await self._prepare_download_support(task, stage)
@@ -1135,21 +1891,13 @@ class ResearchAgentService:
             return support_artifacts, "\n\n".join(support_context_parts)
         if task.command == "/review":
             return await self._prepare_review_support(task, stage)
-        wiki_has_evidence = False
         if task.command in {"/wiki", "/idea"}:
-            wiki_artifacts, wiki_context, wiki_has_evidence = await self._prepare_research_wiki_support(
-                task,
-                stage,
-            )
+            wiki_artifacts, wiki_context, _ = await self._prepare_research_wiki_support(task, stage)
             support_artifacts.extend(wiki_artifacts)
             if wiki_context:
                 support_context_parts.append(wiki_context)
             if task.command == "/wiki":
                 return support_artifacts, "\n\n".join(support_context_parts)
-        if task.command == "/idea" and stage.name in {"idea_verification", "final_idea"}:
-            candidate_lock = self._idea_candidate_lock(task)
-            if candidate_lock:
-                support_context_parts.append(candidate_lock)
         if task.command not in {"/review", "/idea"}:
             return support_artifacts, "\n\n".join(support_context_parts)
         if task.command == "/idea":
@@ -1160,8 +1908,6 @@ class ResearchAgentService:
             existing_evidence = next((path for path in evidence_paths if path.exists()), None)
             if existing_evidence:
                 support_context_parts.append(self._file_excerpt(str(existing_evidence), 5000))
-                return support_artifacts, "\n\n".join(support_context_parts)
-            if wiki_has_evidence:
                 return support_artifacts, "\n\n".join(support_context_parts)
         query = self._search_query_for_task(task.objective)
         if not query:
@@ -1190,101 +1936,88 @@ class ResearchAgentService:
         support_context_parts.append(bundle.prompt_excerpt())
         return support_artifacts, "\n\n".join(support_context_parts)
 
-    def _idea_candidate_lock(self, task: TaskRun) -> str:
-        candidates = self._artifact_text(task, "idea/IDEA_CANDIDATES.md")
-        recommended = self._markdown_section(candidates, "Recommended Candidate")
-        if not recommended:
-            return ""
-        parts = [
-            "Locked recommended candidate:\n" + recommended,
-            "The critic and finalizer must work on this exact candidate. Do not substitute another candidate.",
-        ]
-        verification = self._artifact_text(task, "idea/IDEA_VERIFICATION.md")
-        verdict = self._markdown_section(verification, "Verification Verdict")
-        if verdict:
-            parts.append("Locked critic verdict:\n" + verdict)
-        return "\n\n".join(parts)
-
-    @staticmethod
-    def _markdown_section(content: str, title: str) -> str:
-        match = re.search(
-            rf"(?ms)^#{{1,6}}\s*{re.escape(title)}[^\n]*\n(.*?)(?=^#{{1,6}}\s|\Z)",
-            content,
-        )
-        return match.group(1).strip() if match else ""
-
     async def _prepare_research_wiki_support(
         self,
         task: TaskRun,
         stage: StageDefinition,
     ) -> tuple[list, str, bool]:
+        """Use the upstream Research Wiki layout as the session evidence adapter."""
         workspace_root = Path(task.artifact_root)
         wiki_store = ResearchWikiStore(workspace_root)
         artifacts: list = []
         source_refs = discover_pdf_sources(workspace_root)
+        primary_papers: dict[str, WikiPaper] = {}
         for source_ref in source_refs:
             paper = wiki_store.paper_for_source(source_ref)
+            primary_papers[source_ref] = paper
             wiki_store.ensure_pdf_copy(paper)
+            source_path = workspace_root / source_ref
             artifacts.append(
-                self._record_existing(
+                self._write_bytes(
                     task,
                     paper.wiki_pdf_relative_path,
+                    source_path.read_bytes(),
                     kind="document",
-                    description=f"Wiki PDF copy for {paper.paper_id}.",
+                    description=f"Upstream Research Wiki PDF copy for {paper.paper_id}.",
                 )
             )
-            evidence_records = collect_paper_evidence(
-                workspace_root,
-                [source_ref],
-                total_limit=18000,
-                query=task.objective,
-                prioritize_research_sections=True,
-            )
-            if not wiki_store.summary_exists(paper):
-                generated_summary = await self._generate_wiki_paper_summary(
-                    task,
-                    paper,
-                    evidence_records,
-                )
-                summary_content = wiki_store.paper_summary_markdown(paper, generated_summary)
-                summary_artifact = self._write_text(
-                    task,
-                    paper.summary_relative_path,
-                    summary_content,
-                    kind="wiki",
-                    description=f"Per-paper Wiki summary for {paper.paper_id}.",
+            if wiki_store.summary_exists(paper):
+                summary = (workspace_root / paper.summary_relative_path).read_text(
+                    encoding="utf-8", errors="ignore"
                 )
             else:
-                summary_artifact = self._record_existing(
+                evidence_records = collect_paper_evidence(
+                    workspace_root, [source_ref], total_limit=18000
+                )
+                summary = wiki_store.paper_summary_markdown(
+                    paper,
+                    await self._generate_wiki_paper_summary(task, paper, evidence_records),
+                )
+            artifacts.append(
+                self._write_text(
                     task,
                     paper.summary_relative_path,
+                    summary,
                     kind="wiki",
-                    description=f"Per-paper Wiki summary for {paper.paper_id}.",
+                    description=f"Upstream Research Wiki summary for {paper.paper_id}.",
                 )
-            artifacts.append(summary_artifact)
+            )
 
-        index_artifact = self._write_text(
-            task,
-            "wiki/index.md",
-            wiki_store.rebuild_index(),
-            kind="wiki",
-            description="Research Wiki paper index.",
+        if config.wiki_reference_expansion_enabled:
+            artifacts.extend(
+                await self._expand_wiki_references(
+                    task,
+                    wiki_store,
+                    source_refs,
+                    primary_papers,
+                )
+            )
+
+        artifacts.append(
+            self._write_text(
+                task,
+                "wiki/index.md",
+                wiki_store.rebuild_index(),
+                kind="wiki",
+                description="Upstream Research Wiki paper index.",
+            )
         )
-        artifacts.append(index_artifact)
-
-        query = task.objective
-        if task.command == "/idea" and stage.name == "idea_verification":
-            query = f"{task.objective} 最近前例 反对证据 失败条件 实验范式"
-        query_pack = wiki_store.query_pack(query)
-        query_pack_artifact = self._write_text(
-            task,
-            "wiki/query_pack.md",
-            query_pack,
-            kind="wiki",
-            description="Topic-focused Wiki retrieval pack.",
+        query_pack = wiki_store.query_pack(
+            task.objective,
+            limit=(config.wiki_idea_query_paper_limit if task.command == "/idea" else 5),
+            character_limit=(
+                config.wiki_idea_query_character_limit if task.command == "/idea" else 8000
+            ),
         )
-        artifacts.append(query_pack_artifact)
-
+        artifacts.append(
+            self._write_text(
+                task,
+                "wiki/query_pack.md",
+                query_pack,
+                kind="wiki",
+                description="Upstream topic-focused Research Wiki retrieval pack.",
+            )
+        )
         context_parts = ["Research Wiki retrieval context:\n" + query_pack[:9000]]
         has_wiki_papers = bool(wiki_store.list_papers())
         if not has_wiki_papers:
@@ -1294,6 +2027,141 @@ class ResearchAgentService:
             if local_context.limitations:
                 context_parts.append("Evidence limitations:\n- " + "\n- ".join(local_context.limitations))
         return artifacts, "\n\n".join(context_parts), has_wiki_papers
+
+    async def _expand_wiki_references(
+        self,
+        task: TaskRun,
+        wiki_store: ResearchWikiStore,
+        source_refs: list[str],
+        primary_papers: dict[str, WikiPaper],
+    ) -> list:
+        workspace_root = Path(task.artifact_root)
+        artifacts: list = []
+        expansion_results: list[ReferenceExpansionResult] = []
+        remaining_total_bytes = max(1, config.wiki_reference_max_total_mb) * 1024 * 1024
+        uploaded_sources = [ref for ref in source_refs if "/uploads/" in ref]
+        for source_ref in uploaded_sources[: max(0, config.wiki_reference_source_limit)]:
+            if remaining_total_bytes <= 0:
+                break
+            primary_paper = primary_papers[source_ref]
+            self._log_progress(
+                task,
+                f"正在按显式配置扩展直接参考文献：{primary_paper.paper_id}",
+                kind="retrieval",
+            )
+            result = await expand_pdf_references(
+                source_ref,
+                workspace_root,
+                primary_paper_id=primary_paper.paper_id,
+                limit=config.wiki_reference_limit,
+                download_limit=config.wiki_reference_download_limit,
+                timeout_seconds=config.wiki_reference_timeout_seconds,
+                max_pdf_mb=config.wiki_reference_max_pdf_mb,
+                max_total_mb=config.wiki_reference_max_total_mb,
+                max_total_bytes=remaining_total_bytes,
+            )
+            expansion_results.append(result)
+            remaining_total_bytes -= sum(
+                (workspace_root / record.source_relative_path).stat().st_size
+                for record in result.records
+                if record.status == "downloaded"
+                and record.source_relative_path
+                and (workspace_root / record.source_relative_path).is_file()
+            )
+            manifest_path = workspace_root / result.manifest_relative_path
+            artifacts.append(
+                self._write_text(
+                    task,
+                    result.manifest_relative_path,
+                    manifest_path.read_text(encoding="utf-8"),
+                    kind="wiki",
+                    description=f"Reference expansion manifest for {primary_paper.paper_id}.",
+                )
+            )
+            for record in result.records:
+                if record.status not in {"downloaded", "duplicate"} or not record.source_relative_path:
+                    continue
+                reference_paper = wiki_store.paper_for_source(record.source_relative_path)
+                record.paper_id = reference_paper.paper_id
+                if reference_paper.paper_id == primary_paper.paper_id:
+                    continue
+                wiki_store.ensure_pdf_copy(reference_paper)
+                wiki_pdf = workspace_root / reference_paper.wiki_pdf_relative_path
+                artifacts.append(
+                    self._write_bytes(
+                        task,
+                        reference_paper.wiki_pdf_relative_path,
+                        wiki_pdf.read_bytes(),
+                        kind="document",
+                        description=f"Wiki PDF copy for cited paper {reference_paper.paper_id}.",
+                    )
+                )
+                evidence_records = collect_paper_evidence(
+                    workspace_root,
+                    [record.source_relative_path],
+                    total_limit=18000,
+                )
+                if wiki_store.summary_exists(reference_paper):
+                    summary = (workspace_root / reference_paper.summary_relative_path).read_text(
+                        encoding="utf-8", errors="ignore"
+                    )
+                else:
+                    summary = wiki_store.paper_summary_markdown(
+                        reference_paper,
+                        await self._generate_wiki_paper_summary(
+                            task,
+                            reference_paper,
+                            evidence_records,
+                        ),
+                    )
+                artifacts.append(
+                    self._write_text(
+                        task,
+                        reference_paper.summary_relative_path,
+                        summary,
+                        kind="wiki",
+                        description=f"Wiki summary for cited paper {reference_paper.paper_id}.",
+                    )
+                )
+            wiki_store.append_citation_relations(
+                primary_paper.paper_id,
+                [record.__dict__ for record in result.records],
+            )
+
+        if not expansion_results:
+            return artifacts
+        catalog_records = [
+            record.__dict__
+            for result in expansion_results
+            for record in result.records
+        ]
+        artifacts.extend(
+            [
+                self._write_text(
+                    task,
+                    "wiki/reference_catalog.json",
+                    json.dumps(
+                        {
+                            "primary_sources": [result.primary_source for result in expansion_results],
+                            "records": catalog_records,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                    kind="wiki",
+                    description="Reference inventory with download and Wiki ingestion status.",
+                ),
+                self._write_text(
+                    task,
+                    "wiki/reference_catalog.md",
+                    reference_catalog_markdown(expansion_results),
+                    kind="wiki",
+                    description="Human-readable reference expansion catalog.",
+                ),
+            ]
+        )
+        return artifacts
 
     async def _generate_wiki_paper_summary(
         self,
@@ -1308,17 +2176,17 @@ class ResearchAgentService:
         try:
             return await generate_text(
                 system_prompt=(
-                    "You create faithful Chinese research Wiki summaries from page-linked evidence. "
-                    "Never invent facts, citations, datasets, results, limitations, or future work. "
-                    "Clearly mark model inference and uncertainty. Return markdown without a level-one title."
+                    "Create a faithful Chinese Research Wiki summary from page-linked evidence. "
+                    "Never invent facts, datasets, results, limitations, or future work. "
+                    "Return markdown without a level-one title."
                 ),
                 user_prompt=(
-                    f"Paper ID: {paper.paper_id}\n"
-                    f"Source PDF: {paper.source_relative_path}\n\n"
+                    f"Paper ID: {paper.paper_id}\nSource PDF: {paper.source_relative_path}\n\n"
                     "Use exactly these sections: 研究问题, 核心方法, 数据集与实验设置, 主要结果, "
-                    "作者讨论与局限, 作者提出的未来工作, 可复用证据, 与其他论文的关系, "
-                    "对 Idea 生成的提示. Every factual point should cite an available Evidence ID and page. "
-                    "If the evidence does not support a section, write 未确认.\n\n"
+                    "作者讨论与局限, 作者提出的未来工作, 作者明确指出的 Gap, 基于证据推断的 Gap, "
+                    "可复用证据, 与其他论文的关系, 对 Idea 生成的提示, 证据边界与未确认内容. "
+                    "Keep author-explicit gaps separate from model inference. Every factual point must cite an available Evidence ID and page. "
+                    "Write 未确认 when evidence does not support a section.\n\n"
                     f"Evidence:\n{evidence_context}"
                 ),
                 model=config.upstream_model or None,
@@ -1363,6 +2231,52 @@ class ResearchAgentService:
         local_evidence_refs = sorted({str(record["source_path"]) for record in local_records})
         local_context = self._review_local_context(local_records)
         if stage.name == "literature_synthesis":
+            if self._uses_frozen_local_corpus(task.objective) and local_refs:
+                bundle = build_frozen_local_corpus_bundle(
+                    topic,
+                    workspace_root,
+                    local_refs,
+                    queries=queries,
+                )
+                if not review_evidence_is_sufficient(bundle):
+                    raise ReviewEvidenceError(
+                        "冻结本地语料中的可追溯论文不足，已停止正式综述。请补充带 paper_id 的 JSONL 页级证据。"
+                    )
+                self._log_progress(
+                    task,
+                    f"使用冻结本地语料：保留 {len(bundle.papers)} 篇，不执行外部检索。",
+                    kind="retrieval",
+                )
+                generated = [
+                    self._write_text(
+                        task,
+                        "bib/LITERATURE_SEARCH.md",
+                        bundle.to_markdown(),
+                        kind="note",
+                        description="Frozen user-provided literature corpus with stable paper IDs.",
+                    ),
+                    self._write_text(
+                        task,
+                        "bib/LITERATURE_SEARCH.json",
+                        bundle.to_json(),
+                        kind="note",
+                        description="Structured frozen literature corpus with stable paper IDs.",
+                    ),
+                    self._write_text(
+                        task,
+                        "bib/RETRIEVAL_QUALITY.md",
+                        review_quality_markdown(bundle, local_sources=[], local_candidates=local_refs),
+                        kind="review",
+                        description="Deterministic evidence gate for the frozen local corpus.",
+                    ),
+                ]
+                task.artifacts.extend(generated)
+                return generated, (
+                    "Use only the frozen user-provided corpus below. Cite every paper-level factual claim with stable "
+                    "IDs such as [P001]. Do not perform external retrieval or introduce references outside this corpus. "
+                    "Distinguish full-text evidence from metadata.\n\n"
+                    + bundle.prompt_excerpt(limit=18000)
+                )
             self._log_progress(task, "正在执行多查询、多来源文献检索", kind="retrieval")
             bundle = await self.scholar.search_bundle(
                 topic,
@@ -1397,7 +2311,9 @@ class ResearchAgentService:
                 limit=config.review_download_limit,
                 max_mb=config.review_download_max_mb,
                 timeout_seconds=config.review_download_timeout_seconds,
+                unpaywall_email=config.unpaywall_email,
                 write_file=write_download,
+                concurrency=config.review_download_concurrency,
             )
             download_counts = download_manifest.get("counts", {})
             self._log_progress(
@@ -1473,6 +2389,20 @@ class ResearchAgentService:
                     kind="review",
                     description="Deterministic retrieval coverage and evidence gate.",
                 ),
+                self._write_text(
+                    task,
+                    "bib/QUERY_YIELD.json",
+                    json.dumps(query_effectiveness_payload(bundle), ensure_ascii=False, indent=2) + "\n",
+                    kind="manifest",
+                    description="Per-query retained-paper metrics for retrieval tuning.",
+                ),
+                self._write_text(
+                    task,
+                    "bib/REVIEW_DIRECTIONS.md",
+                    review_directions_markdown(bundle),
+                    kind="report",
+                    description="Research-direction fallback grounded in the retained retrieval set.",
+                ),
             ]
             generated.extend(download_artifacts)
             generated_paths = {artifact.relative_path for artifact in generated}
@@ -1490,10 +2420,25 @@ class ResearchAgentService:
                 )
             context = (
                 "Use only the admitted evidence below. Cite every paper-level factual claim with stable IDs such as [P001]. "
+                "Every paragraph that reports corpus size, results, comparisons, chronology, or missing study evidence must "
+                "contain the supporting stable IDs in that paragraph; listing an ID only in References does not close the claim. "
                 "Do not cite excluded candidates or invent bibliographic fields. Distinguish metadata/abstract evidence from "
-                "full-text evidence.\n\n"
+                "full-text evidence. Retrieval source labels, provider status, access fields, missing PDF URLs, and download "
+                "status are platform operations, not facts about a study or publication; do not turn them into review claims. "
+                "A missing field means 'not supplied in this package', not that the underlying information does not exist.\n\n"
                 + bundle.prompt_excerpt(limit=18000)
             )
+            length_contract = extract_writing_length_contract(task.objective)
+            if length_contract and length_contract["unit"] == "words" and len(bundle.papers) <= 5:
+                minimum = int(length_contract["minimum"])
+                maximum = int(length_contract["maximum"])
+                evidence_scaled_target = minimum + round((maximum - minimum) * 0.4)
+                context = (
+                    f"This is a small {len(bundle.papers)}-record corpus. Aim near {evidence_scaled_target} words before "
+                    "references, in the lower half of the permitted range, unless non-redundant evidence requires more. "
+                    "Prefer synthesis density over repeating the same unknown or boundary across sections.\n\n"
+                    + context
+                )
             if local_context:
                 context += "\n\n" + local_context
             return generated, context
@@ -1511,7 +2456,7 @@ class ResearchAgentService:
         return [], "\n\n".join(context_parts)
 
     def _review_local_source_refs(self, workspace_root: Path) -> list[str]:
-        allowed = {".bib", ".docx", ".enw", ".md", ".nbib", ".pdf", ".ris", ".tex", ".txt"}
+        allowed = {".bib", ".csv", ".docx", ".enw", ".json", ".jsonl", ".md", ".nbib", ".pdf", ".ris", ".tex", ".txt"}
         candidates = [
             path
             for path in workspace_root.glob("*/uploads/*")
@@ -1524,6 +2469,15 @@ class ResearchAgentService:
         )
         candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
         return [path.relative_to(workspace_root).as_posix() for path in candidates[:20]]
+
+    @staticmethod
+    def _uses_frozen_local_corpus(objective: str) -> bool:
+        lowered = objective.casefold()
+        return (
+            any(marker in lowered for marker in ("uploaded", "local", "supplied", "上传", "本地", "提供"))
+            and any(marker in lowered for marker in ("only", "冻结", "仅", "只"))
+            and any(marker in lowered for marker in ("corpus", "语料", "evidence", "证据"))
+        )
 
     def _review_local_context(self, records: list[dict]) -> str:
         if not records:
@@ -1568,6 +2522,8 @@ class ResearchAgentService:
             "INSTITUTIONAL_ACCESS.json",
             "INSTITUTIONAL_ACCESS.md",
             "RETRIEVAL_QUALITY.md",
+            "QUERY_YIELD.json",
+            "REVIEW_DIRECTIONS.md",
             "LITERATURE_REVIEW.md",
             "EVIDENCE_MAP.md",
             "RESEARCH_GAPS.md",
@@ -1880,7 +2836,7 @@ class ResearchAgentService:
             ),
         ]
         return [*artifacts, *download_artifacts, *generated], context
-    def _prepare_write_support(self, task: TaskRun) -> tuple[list, str]:
+    async def _prepare_write_support(self, task: TaskRun) -> tuple[list, str]:
         workspace_root = Path(task.artifact_root)
         source_config = task.write_source
         if source_config is None:
@@ -1894,6 +2850,12 @@ class ResearchAgentService:
             task.write_source = source_config
             self.store.save_task(task)
 
+        venue_profile = select_venue_profile(task.objective)
+        artifacts: list = []
+        retrieval_artifacts, retrieval_context = await self._prepare_topic_driven_write_retrieval(
+            task, source_config, venue_profile
+        )
+        artifacts.extend(retrieval_artifacts)
         selection = {
             "task_id": task.task_id,
             **source_config.model_dump(),
@@ -1901,7 +2863,6 @@ class ResearchAgentService:
         }
         selection_json = json.dumps(selection, ensure_ascii=False, indent=2)
         selection_path = workspace_root / "Content" / "PAPER_SOURCE_SELECTION.json"
-        artifacts: list = []
         if (
             not selection_path.exists()
             or selection_path.read_text(encoding="utf-8", errors="ignore") != selection_json
@@ -1917,7 +2878,17 @@ class ResearchAgentService:
             )
 
         records = self._paper_evidence_records(task)
-        venue_profile = select_venue_profile(task.objective)
+        session_knowledge = self._build_session_knowledge_package(task)
+        if session_knowledge["status"] == "available":
+            artifacts.append(
+                self._write_text(
+                    task,
+                    "Content/SESSION_KNOWLEDGE_PACKAGE.json",
+                    json.dumps(session_knowledge, ensure_ascii=False, indent=2),
+                    kind="manifest",
+                    description="Frozen same-session literature, evidence-map, gap, wiki, and style-learning handoff for writing.",
+                )
+            )
         profile_json = json.dumps(venue_profile, ensure_ascii=False, indent=2)
         profile_path = workspace_root / "Content" / "PAPER_VENUE_PROFILE.json"
         if (
@@ -1933,6 +2904,8 @@ class ResearchAgentService:
                     description="Paper type, target venue, and content delivery requirements.",
                 )
             )
+        venue_artifacts, venue_context = await self._prepare_venue_style_discovery(task, venue_profile)
+        artifacts.extend(venue_artifacts)
         context = (
             "Paper writing SourceSet contract:\n"
             f"- Frozen scope: {source_config.resolved_scope}\n"
@@ -1948,7 +2921,351 @@ class ResearchAgentService:
             + "\n\nEvidence records:\n"
             + (paper_evidence_prompt(records) or "No readable evidence was extracted; keep all unsupported sections explicit.")
         )
+        if retrieval_context:
+            context += "\n\n" + retrieval_context
+        if session_knowledge["status"] == "available":
+            context += (
+                "\n\nSame-session knowledge package:\n"
+                "- This package was frozen from completed session work before this /write task.\n"
+                "- Use it to frame the problem, structure the argument, select admitted literature, and preserve evidence boundaries.\n"
+                "- Do not treat a knowledge-package summary as new evidence: retain the cited stable IDs or exact source paths beside factual claims.\n"
+                + "\n".join(
+                    f"### {source['relative_path']} (from {source['task_id']})\n{source['excerpt']}"
+                    for source in session_knowledge["knowledge_sources"]
+                )
+            )
+        if venue_context:
+            context += "\n\n" + venue_context
+        context_payload = build_writing_context(task.objective, list(source_config.source_refs), venue_profile)
+        context_payload["evidence_ids"] = [record["evidence_id"] for record in records]
+        from .evaluation import discipline_requirements
+
+        discipline_contract = list(discipline_requirements().get(context_payload["discipline"], ()))
+        if discipline_contract:
+            context_payload["discipline_requirements"] = discipline_contract
+            context += (
+                "\n\nDiscipline quality contract:\n"
+                + "\n".join(f"- {requirement}" for requirement in discipline_contract)
+                + "\nAddress each requirement explicitly, or mark the missing evidence as [AUTHOR INPUT NEEDED]."
+            )
+        writing_package = WritingPackage(
+            package_id=f"wp-{task.task_id}",
+            objective=task.objective,
+            source_ids=list(source_config.source_refs),
+            evidence_ids=context_payload["evidence_ids"],
+            resource_versions={"writing_context": context_payload["schema_version"]},
+        )
+        manuscript_context = ManuscriptContext(
+            manuscript_id=f"manuscript-{task.task_id}",
+            discipline=str(context_payload.get("discipline", "general")),
+            language=str(context_payload.get("language", "en")),
+            article_type=str(venue_profile["profile"]).replace("-", "_"),
+            venue=str(venue_profile["venue"]),
+            writing_package_id=writing_package.package_id,
+        )
+        artifacts.extend(
+            [
+                self._write_text(
+                    task,
+                    "Content/WRITING_PACKAGE.json",
+                    writing_package.model_dump_json(indent=2),
+                    kind="manifest",
+                    description="Traceable writing input package.",
+                ),
+                self._write_text(
+                    task,
+                    "Content/MANUSCRIPT_CONTEXT.json",
+                    manuscript_context.model_dump_json(indent=2),
+                    kind="manifest",
+                    description="Resolved manuscript context for the writing workflow.",
+                ),
+            ]
+        )
+        paragraph_contracts = [
+            ParagraphContract(
+                section=section,
+                purpose=f"Draft the {section} section using frozen evidence only.",
+                author_input_needed=f"Provide any missing facts, numbers, or structure required for {section}.",
+                evidence_ids=context_payload["evidence_ids"],
+            ).model_dump()
+            for section in venue_profile["required_sections"]
+        ]
+        artifacts.append(
+            self._write_text(
+                task,
+                "paper/PARAGRAPH_CONTRACTS.json",
+                json.dumps(paragraph_contracts, ensure_ascii=False, indent=2),
+                kind="plan",
+                description="Section-level paragraph contracts and evidence boundaries.",
+            )
+        )
+        artifacts.append(
+            self._write_text(
+                task,
+                "Content/WRITING_CONTEXT.json",
+                json.dumps(context_payload, ensure_ascii=False, indent=2),
+                kind="manifest",
+                description="Structured writing context and evidence boundary.",
+            )
+        )
         return artifacts, context
+
+    async def _prepare_topic_driven_write_retrieval(
+        self, task: TaskRun, source_config, venue_profile: dict
+    ) -> tuple[list, str]:
+        """Run bounded retrieval when the user requests topic-led writing without supplied materials."""
+        if source_config.source_refs:
+            return [], ""
+        workspace_root = Path(task.artifact_root)
+        objective = re.sub(r"^\s*/write\b", "", task.objective, flags=re.I).strip()
+        retrieval_requested = bool(
+            re.search(r"检索|搜索|找文献|文献|主题|领域|literature|search|sources|topic", objective, re.I)
+        )
+        if venue_profile.get("venue") == "unspecified" and not retrieval_requested:
+            return [], ""
+        existing_search = workspace_root / "bib" / "LITERATURE_SEARCH.md"
+        if existing_search.exists():
+            return [], (
+                "Topic-driven writing retrieval was already frozen for this task. Use its admitted stable IDs only; "
+                "do not retrieve additional sources.\n\n"
+                + self._file_excerpt(str(existing_search), 18000)
+            )
+        topic = clean_review_topic(objective)
+        venue_suffix = "" if venue_profile.get("venue") == "unspecified" else f" {venue_profile['venue']}"
+        query = f"{topic}{venue_suffix} {venue_profile['profile']}"
+        self._log_progress(task, "主题写作未提供研究材料：正在执行内部文献检索与会话知识沉淀。", kind="retrieval")
+        bundle = await self.scholar.search_bundle(
+            query, per_source_limit=config.scholar_results_per_source, max_papers=24
+        )
+        if not review_evidence_is_sufficient(bundle):
+            raise ReviewEvidenceError(
+                "主题写作的内部检索未获得足够相关且可追溯的文献，已停止起草，避免用无关来源生成论文。"
+            )
+        downloaded: list = []
+
+        def write_download(relative_path: str, content: bytes):
+            artifact = self._write_bytes(
+                task, relative_path, content, kind="document",
+                description="Lawfully accessible literature full text downloaded for same-session evidence and style learning.",
+            )
+            downloaded.append(artifact)
+            return artifact
+
+        manifest = await download_public_pdfs(
+            bundle, workspace_root, enabled=config.review_download_enabled,
+            limit=config.review_download_limit, max_mb=config.review_download_max_mb,
+            timeout_seconds=config.review_download_timeout_seconds, write_file=write_download,
+        )
+        artifacts = [
+            self._write_text(task, "bib/LITERATURE_SEARCH.md", bundle.to_markdown(), kind="note",
+                             description="Internal retrieval records for topic-driven paper writing."),
+            self._write_text(task, "bib/LITERATURE_SEARCH.json", bundle.to_json(), kind="manifest",
+                             description="Stable-ID literature records for topic-driven paper writing."),
+            self._write_text(task, "bib/LITERATURE_DOWNLOADS.json", json.dumps(manifest, ensure_ascii=False, indent=2), kind="manifest",
+                             description="Lawful full-text download status for topic-driven paper writing."),
+            *downloaded,
+        ]
+        evidence_rows = [
+            f"- Claim boundary: {paper.title or 'Untitled'} ({paper.year or 'year not supplied'}) — use only its admitted summary; cite [{paper.paper_id}]."
+            for paper in bundle.papers
+        ]
+        taxonomy = {
+            "schema_version": "topic-writing-taxonomy/v1",
+            "topic": topic,
+            "axes": ["problem", "method", "data_or_context", "evidence_strength", "limitation"],
+            "paper_ids": [paper.paper_id for paper in bundle.papers],
+        }
+        artifacts.extend([
+            self._write_text(task, "bib/EVIDENCE_MAP.md", "# Topic-writing Evidence Map\n\n" + "\n".join(evidence_rows) + "\n", kind="report",
+                             description="Stable-ID evidence boundaries for topic-driven paper writing."),
+            self._write_text(task, "bib/REVIEW_TAXONOMY.json", json.dumps(taxonomy, ensure_ascii=False, indent=2), kind="plan",
+                             description="Initial evidence taxonomy for topic-driven paper writing."),
+            self._write_text(task, "wiki/KNOWLEDGE_DIGEST.md",
+                             "# Session Knowledge Digest\n\n"
+                             f"- Topic: {topic}\n- Target venue: {venue_profile['venue']}\n"
+                             f"- Admitted papers: {', '.join(paper.paper_id for paper in bundle.papers)}\n"
+                             "- Use: frame literature-grounded sections and retain stable IDs beside factual claims.\n",
+                             kind="note", description="Same-session knowledge digest for topic-driven writing."),
+        ])
+        target_venue = str(venue_profile["venue"]).casefold()
+        matched_fulltexts = [
+            paper.downloaded_path for paper in bundle.papers
+            if paper.download_status == "downloaded" and paper.downloaded_path
+            and target_venue in (paper.venue or "").casefold()
+        ]
+        language = "zh" if re.search(r"中文|汉语|中文期刊", task.objective, re.I) else "en"
+        style_card = build_fulltext_venue_style_card(
+            workspace_root, venue=str(venue_profile["venue"]), article_type=str(venue_profile["profile"]),
+            language=language, allowed_relative_paths=matched_fulltexts,
+        )
+        if style_card:
+            artifacts.append(self._write_text(
+                task, "Content/VENUE_STYLE_CARD.json", style_card.model_dump_json(indent=2), kind="manifest",
+                description="Traceable full-text venue style card derived from lawful same-genre exemplars.",
+            ))
+            style_status = f"Full-text style learning available from {len(matched_fulltexts)} lawful same-venue exemplars."
+        else:
+            status = {
+                "venue": venue_profile["venue"], "article_type": venue_profile["profile"],
+                "fulltext_samples_required": 3, "same_venue_fulltexts_available": len(matched_fulltexts),
+                "status": "metadata_only_fallback",
+                "use_boundary": "Do not claim full-text venue style learning. Use official guidance or candidate metadata only.",
+            }
+            artifacts.append(self._write_text(
+                task, "Content/VENUE_STYLE_LEARNING_STATUS.json", json.dumps(status, ensure_ascii=False, indent=2), kind="manifest",
+                description="Explicit full-text venue style-learning coverage and fallback status.",
+            ))
+            style_status = "Full-text style learning unavailable: fewer than three lawful same-venue full texts; metadata-level fallback only."
+        return artifacts, (
+            "Topic-driven writing retrieval package:\n"
+            "- This /write task internally completed bounded literature retrieval before drafting.\n"
+            "- Use admitted stable paper IDs for literature-grounded claims; do not invent results, methods, or data absent from user materials.\n"
+            f"- {style_status}\n\n" + bundle.prompt_excerpt(limit=18000)
+        )
+
+    def _prepare_plan_support(self, task: TaskRun) -> tuple[list, str]:
+        """Expose completed same-session review assets to a new planning task."""
+        package = self._build_session_knowledge_package(task)
+        if package["status"] != "available":
+            return [], ""
+        artifacts = [self._write_text(
+            task,
+            "Content/SESSION_KNOWLEDGE_PACKAGE.json",
+            json.dumps(package, ensure_ascii=False, indent=2),
+            kind="manifest",
+            description="Frozen same-session literature and knowledge handoff for research planning.",
+        )]
+        conflict_review, candidates = build_handoff_conflict_review(package["knowledge_sources"])
+        artifacts.append(
+            self._write_text(
+                task,
+                "Content/HANDOFF_CONFLICT_REVIEW.md",
+                conflict_review,
+                kind="review",
+                description="Human confirmation checklist for Idea/Wiki/Plan handoff conflicts.",
+            )
+        )
+        context = (
+            "Same-session knowledge package:\n"
+            "- This package was frozen from completed session work before this /plan task.\n"
+            "- Use it to select the research gap, frame hypotheses, and specify claim-to-evidence requirements.\n"
+            "- Do not convert a summary into a new fact: retain stable paper IDs or exact source paths.\n"
+            + "\n".join(
+                f"### {source['relative_path']} (from {source['task_id']})\n{source['excerpt']}"
+                for source in package["knowledge_sources"]
+            )
+            + "\n\n"
+            + handoff_conflict_context(conflict_review)
+            + f"\nCandidate conflict sources: {len(candidates)}."
+        )
+        return artifacts, context
+
+    def _build_session_knowledge_package(self, task: TaskRun) -> dict:
+        """Freeze reusable knowledge assets from completed tasks in this session."""
+        preferred_paths = {
+            "bib/LITERATURE_SEARCH.json",
+            "bib/LITERATURE_REVIEW.md",
+            "bib/EVIDENCE_MAP.md",
+            "bib/RESEARCH_GAPS.md",
+            "bib/REVIEW_TAXONOMY.json",
+            "bib/SYNTHESIS_MATRIX.json",
+            "wiki/KNOWLEDGE_DIGEST.md",
+            "wiki/MEMORY_UPDATE.md",
+            "wiki/index.md",
+            "wiki/query_pack.md",
+            "Content/VENUE_STYLE_CARD.json",
+            "Content/VENUE_STYLE_DISCOVERY.json",
+        }
+        sources: list[dict[str, str]] = []
+        source_limit = 8
+        for prior in self.store.list_tasks(task.session_id):
+            if prior.task_id == task.task_id or prior.status != "completed":
+                continue
+            for artifact in prior.artifacts:
+                is_upstream_wiki_idea = artifact.relative_path.startswith("wiki/ideas/")
+                if artifact.relative_path not in preferred_paths and not is_upstream_wiki_idea:
+                    continue
+                artifact_path = Path(artifact.absolute_path)
+                if not artifact_path.is_file():
+                    continue
+                excerpt = self._artifact_excerpt(prior, artifact.relative_path)
+                if not excerpt:
+                    continue
+                sources.append(
+                    {
+                        "task_id": prior.task_id,
+                        "command": prior.command,
+                        "relative_path": artifact.relative_path,
+                        "absolute_path": str(artifact_path.resolve()),
+                        "excerpt": excerpt[:5000],
+                    }
+                )
+                if len(sources) >= source_limit:
+                    break
+            if len(sources) >= source_limit:
+                break
+        return {
+            "schema_version": "session-knowledge-package/v1",
+            "session_id": task.session_id,
+            "consumer_task_id": task.task_id,
+            "status": "available" if sources else "not_available",
+            "knowledge_sources": sources,
+            "use_policy": (
+                "Use this package for same-session framing, outline and evidence retrieval. Preserve stable paper IDs or exact source paths in prose; summaries are not independent evidence."
+            ),
+        }
+
+    async def _prepare_venue_style_discovery(self, task: TaskRun, venue_profile: dict) -> tuple[list, str]:
+        venue = str(venue_profile.get("venue", "unspecified"))
+        if venue == "unspecified":
+            return [], ""
+        workspace_root = Path(task.artifact_root)
+        discovery_path = workspace_root / "Content" / "VENUE_STYLE_DISCOVERY.json"
+        markdown_path = workspace_root / "Content" / "VENUE_STYLE_DISCOVERY.md"
+        if discovery_path.exists() and markdown_path.exists():
+            return [], self._file_excerpt(str(markdown_path), 6000)
+
+        query = f"{venue} {venue_profile.get('profile', 'research article')}"
+        self._log_progress(task, f"正在检索 {venue} 的代表性论文，用于会话级写作风格学习。", kind="retrieval")
+        bundle = await self.scholar.search_bundle(query, per_source_limit=4, max_papers=10)
+        payload = {
+            "venue": venue,
+            "article_type": venue_profile.get("profile", "research-article"),
+            "query": query,
+            "retrieval_date": task.updated_at,
+            "status": "candidate_metadata_only",
+            "rule_status": "not_official_guidance",
+            "usage_boundary": (
+                "Use retrieved metadata and abstracts only to select comparable open exemplars and identify abstract-level "
+                "rhetorical patterns. Do not treat them as verified journal instructions or copy prose."
+            ),
+            "bundle": json.loads(bundle.to_json()),
+        }
+        markdown = (
+            "# Venue Style Discovery\n\n"
+            f"- Target venue: {venue}\n"
+            f"- Article type: {venue_profile.get('profile', 'research-article')}\n"
+            "- Status: candidate metadata only; official author guidance is still required for submission compliance.\n"
+            "- Allowed use: choose comparable open exemplars and learn abstract-level rhetorical moves; do not copy prose.\n\n"
+            + bundle.to_markdown()
+        )
+        artifacts = [
+            self._write_text(
+                task,
+                "Content/VENUE_STYLE_DISCOVERY.json",
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                kind="manifest",
+                description="Traceable scholarly discovery for session-level venue style learning.",
+            ),
+            self._write_text(
+                task,
+                "Content/VENUE_STYLE_DISCOVERY.md",
+                markdown,
+                kind="note",
+                description="Human-readable boundary and candidate sources for venue style learning.",
+            ),
+        ]
+        return artifacts, markdown[:6000]
 
     def _paper_evidence_records(self, task: TaskRun) -> list[dict]:
         workspace_root = Path(task.artifact_root)
@@ -1988,7 +3305,7 @@ class ResearchAgentService:
             for part in [
                 "Using the template and the idea artifacts below, fill a focused research contract for handoff to /plan.",
                 "Do not invent an experiment plan; preserve unresolved evidence and planning needs.",
-                "Keep the contract within about 3,000 Chinese characters. Return one markdown document only, without code fences or repeated drafts.",
+                "Return markdown only.",
                 f"Session context:\n{session_context}" if session_context else "",
                 f"Template:\n{template}",
                 f"IDEA_CANDIDATES excerpt:\n{candidates}",
@@ -2002,7 +3319,6 @@ class ResearchAgentService:
             user_prompt=user_prompt,
             temperature=0.2,
         )
-        content = self._normalize_generated_markdown(content, [])
         artifact = self._write_text(
             task,
             "idea/docs/research_contract.md",
@@ -2010,12 +3326,12 @@ class ResearchAgentService:
             kind="contract",
             description="Focused research contract for the selected idea.",
         )
-        self._upsert_task_artifact(task, artifact)
-        for wiki_artifact in self._write_idea_to_wiki(task):
-            self._upsert_task_artifact(task, wiki_artifact)
+        task.artifacts.append(artifact)
+        task.artifacts.extend(self._write_idea_to_wiki(task))
         self.store.save_task(task)
 
     def _write_idea_to_wiki(self, task: TaskRun) -> list:
+        """Preserve the upstream Idea-to-Wiki handoff without changing Paper Agent semantics."""
         final_idea = self._artifact_text(task, "idea/FINAL_IDEA.md")
         if not final_idea.strip():
             return []
@@ -2023,49 +3339,208 @@ class ResearchAgentService:
         query_pack = self._artifact_text(task, "wiki/query_pack.md")
         wiki_store = ResearchWikiStore(task.artifact_root)
         paper_ids = wiki_store.paper_ids_from_query_pack(query_pack)
-        idea_relative_path = wiki_store.write_idea_page(
+        idea_path = wiki_store.write_idea_page(
             task.task_id,
             final_idea=final_idea,
             verification=verification,
             source_paper_ids=paper_ids,
         )
-        relations_relative_path = wiki_store.append_idea_relations(task.task_id, paper_ids)
+        relations_path = wiki_store.append_idea_relations(task.task_id, paper_ids)
         return [
-            self._record_existing(
+            self._write_text(
                 task,
-                idea_relative_path,
+                idea_path,
+                (Path(task.artifact_root) / idea_path).read_text(encoding="utf-8"),
                 kind="wiki",
-                description="Final Idea writeback into the Research Wiki.",
+                description="Upstream Research Wiki final-Idea writeback.",
             ),
-            self._record_existing(
+            self._write_text(
                 task,
-                relations_relative_path,
+                relations_path,
+                (Path(task.artifact_root) / relations_path).read_text(encoding="utf-8"),
                 kind="wiki",
-                description="Minimal Research Wiki relationship edges.",
+                description="Upstream Research Wiki Idea-to-paper relation edges.",
             ),
         ]
 
-    async def _write_figure_delivery_artifacts(self, task: TaskRun) -> list:
-        briefs = self._artifact_text(task, "figures/FIGURE_BRIEFS.md")
-        inventory = self._artifact_excerpt(task, "figures/FIGURE_INVENTORY.md")
-        if not briefs and not inventory:
-            return []
+    def _apply_idea_novelty_gate(self, task: TaskRun, content: str) -> tuple[str, dict]:
+        coverage = ResearchWikiStore(task.artifact_root).coverage_report()
+        reasons: list[str] = []
+        minimum = int(coverage["minimum_papers"])
+        full_text_count = int(coverage["full_text_papers"])
+        if full_text_count < minimum:
+            reasons.append(
+                f"完整可读论文只有 {full_text_count} 篇，低于高置信候选最低要求 {minimum} 篇。"
+            )
+        combined_text = "\n".join(
+            (
+                self._artifact_text(task, "idea/IDEA_CANDIDATES.md"),
+                self._artifact_text(task, "idea/IDEA_VERIFICATION.md"),
+                content,
+            )
+        )
+        reasons.extend(self._idea_novelty_risk_reasons(combined_text))
+        if len(set(re.findall(r"\bP-[A-F0-9]{12}\b", content, re.I))) < 2:
+            reasons.append("最终文档没有明确使用至少两篇完整论文形成跨论文差异。")
+        if not re.search(r"(?:可证伪|失败判据|falsif|失败标准)", content, re.I):
+            reasons.append("最终文档没有明确的可证伪实验或失败判据。")
+        reasons = list(dict.fromkeys(reasons))
+        gate = {
+            "status": "blocked_preliminary" if reasons else "pass",
+            "minimum_papers": minimum,
+            "full_text_papers": full_text_count,
+            "full_text_paper_ids": coverage["full_text_paper_ids"],
+            "reasons": reasons,
+        }
+        if not reasons:
+            return content, gate
+        block = [
+            "## 创新性判定",
+            "",
+            "- status: `blocked_preliminary`",
+            "- 结论: 当前内容只能作为实验起点，不能包装为已经成立的新论文主张。",
+            f"- 完整可读论文: {full_text_count}/{minimum}。",
+            "- 当前证据覆盖: "
+            + (", ".join(f"`{item}`" for item in coverage["full_text_paper_ids"]) or "暂无")
+            + "。",
+            "- 是否建议进入真实实验: 仅建议复现或预实验；补齐证据并重新核验后再升级主张。",
+            "",
+            "### 拦截原因",
+            "",
+            *[f"- {reason}" for reason in reasons],
+        ]
+        block_text = "\n".join(block)
+        if re.search(r"(?mi)^##\s*创新性判定\s*$", content):
+            content = re.sub(
+                r"(?ms)^##\s*创新性判定\s*\n.*?(?=^##\s|\Z)",
+                block_text + "\n\n",
+                content,
+                count=1,
+            )
+        else:
+            content = content.rstrip() + "\n\n" + block_text + "\n"
+        return content, gate
 
+    @staticmethod
+    def _idea_novelty_risk_reasons(text: str) -> list[str]:
+        reasons: list[str] = []
+        for line in text.splitlines():
+            normalized = line.casefold()
+            positive = re.search(
+                r"(?:\||:|：)\s*(?:是|yes|true|direct_extension|直接延伸|直接复述|已经实现|已实现)\b",
+                line,
+                re.I,
+            )
+            if positive and any(
+                marker in normalized
+                for marker in ("future work", "未来工作", "直接延伸", "直接复述")
+            ):
+                reasons.append("候选或批评结果显示它可能只是作者 Future Work 的直接延伸。")
+            if positive and any(
+                marker in normalized
+                for marker in ("已有论文", "已有方法", "是否已经实现", "重复风险")
+            ):
+                reasons.append("候选或批评结果显示已有论文可能已经实现相同方法。")
+            if "证据不足" in normalized and not re.search(
+                r"(?:不存在|不是|并非|已解决|已补足|否).{0,8}证据不足",
+                line,
+                re.I,
+            ):
+                reasons.append("候选或批评结果仍明确标记为证据不足。")
+        return reasons
+
+    async def _write_figure_delivery_artifacts(self, task: TaskRun) -> list:
+        contract_text = self._artifact_text(task, "figures/FIGURE_CONTRACT.json")
+        style_text = self._artifact_text(task, "figures/VISUAL_STYLE_SPEC.json")
+        if not contract_text or not style_text:
+            return []
+        contract = FigureContract.model_validate_json(contract_text)
+        style = VisualStyleSpec.model_validate_json(style_text)
         session = self.store.load_session(task.session_id)
-        data_sources = select_data_sources(
+        source_config = task.figure_source or resolve_figure_source_config(
+            task.objective,
             Path(task.artifact_root),
             session.upload_batches if session else (),
         )
-        try:
+        task.figure_source = source_config
+        generated: list = []
+        assist_assets: list[str] = []
+        warnings: list[str] = []
+        edit_banana_result = None
+
+        if contract.renderer != "matplotlib" and re.search(
+            r"(?:ImageGen|定制插画|生成插画素材|custom illustration)", task.objective, re.I
+        ):
+            try:
+                image = await generate_image(
+                    prompt=(
+                        "Create one isolated, text-free academic illustration asset on a transparent or white background. "
+                        "Do not include labels, letters, numbers, arrows, panels, or diagram structure."
+                    ),
+                    model=config.image_model,
+                    size="1024x1024",
+                    quality="low",
+                    output_format="png",
+                )
+                illustration = self._write_bytes(
+                    task,
+                    "figures/generated/CUSTOM_ILLUSTRATION.png",
+                    image.image_bytes,
+                    kind="image",
+                    description="Explicitly requested decorative illustration; never a structural source.",
+                )
+                generated.append(illustration)
+                assist_assets.append(illustration.relative_path)
+            except Exception as exc:
+                warnings.append(f"Explicit ImageGen illustration failed: {exc.__class__.__name__}")
+
+        wps_artifact = None
+        if re.search(r"(?:WPS|转\s*PPT|图片转PPT|convert.*ppt)", task.objective, re.I):
+            canonical_extension = {
+                "matplotlib": "py",
+                "figurespec": "svg",
+                "academic_svg": "svg",
+                "drawio": "drawio",
+            }[contract.renderer]
+            wps_artifact = self._write_text(
+                task,
+                "figures/generated/WPS_HANDOFF.json",
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "mode": "manual_handoff",
+                        "external_service": "https://aippt.wps.cn/aippt/convert-ppt/home",
+                        "canonical_source": False,
+                        "canonical_source_candidate": f"figures/generated/FIGURE_01.{canonical_extension}",
+                        "external_upload_performed": False,
+                        "privacy_confirmation_required": True,
+                        "upload_candidate": "figures/generated/FIGURE_01.png",
+                        "label_allowlist": contract.label_allowlist,
+                        "checks_after_conversion": [
+                            "all text matches the label allowlist",
+                            "arrows remain separate and point in the contract direction",
+                            "grouping and occlusion match the canonical preview",
+                            "the PPTX remains a draft; edit the declared canonical source for structural changes",
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                kind="manifest",
+                description="Manual WPS image-to-PPT experiment handoff; no external upload performed.",
+            )
+            generated.append(wps_artifact)
+
+        if contract.renderer == "matplotlib":
             rendered = render_code_figure(
                 Path(task.artifact_root),
                 session.upload_batches if session else (),
                 objective=task.objective,
+                explicit_source_refs=source_config.data_refs,
             )
-        except NoRenderableDataError as exc:
-            rendered = None
-            data_warnings = exc.warnings
-        else:
+            qa = validate_code_figure(rendered)
+            if qa["hard_status"] != "pass":
+                raise RuntimeError("Figure QA failed: " + "; ".join(qa["errors"]))
             image_artifact = self._write_bytes(
                 task,
                 "figures/generated/FIGURE_01.png",
@@ -2078,85 +3553,200 @@ class ResearchAgentService:
                 "figures/generated/FIGURE_01.svg",
                 rendered.svg_bytes,
                 kind="image",
-                description="Editable vector export of the code-rendered research chart.",
+                description="Vector SVG export of the code-rendered research chart.",
             )
-            manifest = {
-                "mode": "code",
-                "input_files": [rendered.source_ref],
+            pdf_artifact = self._write_bytes(
+                task,
+                "figures/generated/FIGURE_01.pdf",
+                rendered.pdf_bytes,
+                kind="document",
+                description="Publication-oriented vector PDF export.",
+            )
+            source_artifact = self._write_text(
+                task,
+                "figures/generated/FIGURE_01.py",
+                rendered.source_code,
+                kind="document",
+                description="Canonical reproducible Python source for the data figure.",
+            )
+            route_metadata = {
                 "sheet": rendered.sheet_name,
                 "chart_type": rendered.chart_type,
                 "x_column": rendered.x_column,
                 "y_columns": rendered.y_columns,
                 "row_count": rendered.row_count,
-                "outputs": [image_artifact.relative_path, svg_artifact.relative_path],
-                "renderer": "matplotlib",
-                "warnings": rendered.warnings,
             }
-            manifest_artifact = self._write_text(
+            warnings.extend(rendered.warnings)
+        else:
+            if contract.kind == "reference_reproduction":
+                if not config.edit_banana_base_url:
+                    raise RuntimeError(
+                        "Edit Banana reference decomposition is unavailable; configure EDIT_BANANA_BASE_URL"
+                    )
+                if not source_config.image_refs:
+                    raise RuntimeError("Reference decomposition requires a frozen image input")
+                edit_banana_result = await convert_reference_to_drawio(
+                    Path(task.artifact_root, source_config.image_refs[0]),
+                    base_url=config.edit_banana_base_url,
+                    timeout_seconds=config.edit_banana_timeout_seconds,
+                    label_allowlist=contract.label_allowlist,
+                )
+                warnings.extend(edit_banana_result.warnings)
+            rendered = render_diagram(contract, style)
+            if edit_banana_result is not None:
+                rendered = replace(rendered, editable_bytes=edit_banana_result.drawio_xml)
+                rendered.qa["publication_status"] = "needs_human_visual_review"
+                rendered.qa["warnings"] = [
+                    *rendered.qa.get("warnings", []),
+                    "Edit Banana output is a non-canonical draft; topology and OCR require human review",
+                ]
+            qa = rendered.qa
+            if qa["hard_status"] != "pass":
+                raise RuntimeError("Figure QA failed: " + "; ".join(qa["errors"]))
+            render_spec_artifact = self._write_text(
                 task,
-                "figures/generated/FIGURE_DELIVERY.json",
-                json.dumps(manifest, ensure_ascii=False, indent=2),
-                kind="manifest",
-                description="Traceable delivery manifest for the generated figure.",
+                "figures/generated/FIGURE_01.render.json",
+                json.dumps(rendered.render_spec, ensure_ascii=False, indent=2),
+                kind="note",
+                description="Renderer-neutral layout specification used for SVG and editable source generation.",
             )
-            self._log_progress(
+            generated.append(render_spec_artifact)
+            image_artifact = self._write_bytes(
                 task,
-                f"检测到明确数据，已通过代码生成 {rendered.chart_type} 图: {image_artifact.relative_path}",
-                kind="figure",
+                "figures/generated/FIGURE_01.png",
+                rendered.png_bytes,
+                kind="image",
+                description="Rendered preview of the editable research diagram.",
             )
-            self.store.save_task(task)
-            return [image_artifact, svg_artifact, manifest_artifact]
+            svg_artifact = self._write_bytes(
+                task,
+                "figures/generated/FIGURE_01.svg",
+                rendered.svg_bytes,
+                kind="image",
+                description="Editable vector SVG export generated from the shared render specification.",
+            )
+            pdf_artifact = self._write_bytes(
+                task,
+                "figures/generated/FIGURE_01.pdf",
+                rendered.pdf_bytes,
+                kind="document",
+                description="Publication-oriented PDF export generated from the shared render specification.",
+            )
+            if rendered.renderer == "academic_svg":
+                source_artifact = svg_artifact
+            else:
+                source_relative = f"figures/generated/FIGURE_01.{rendered.editable_extension}"
+                source_artifact = self._write_bytes(
+                    task,
+                    source_relative,
+                    rendered.editable_bytes,
+                    kind="document",
+                    description=(
+                        "Editable Draw.io source with native text, nodes, and connectors."
+                        if edit_banana_result is None
+                        else "Non-canonical Edit Banana Draw.io reconstruction draft."
+                    ),
+                )
+            route_metadata = {"render_spec": render_spec_artifact.relative_path}
 
-        prompt = await self._build_figure_render_prompt(task, inventory, briefs)
-        prompt_artifact = self._write_text(
+        qa_artifact = self._write_text(
             task,
-            "figures/generated/FIGURE_RENDER_PROMPT.md",
-            prompt,
-            kind="note",
-            description="Render prompt used for gpt-image-2 figure generation.",
+            "figures/generated/FIGURE_QA.json",
+            json.dumps(qa, ensure_ascii=False, indent=2),
+            kind="manifest",
+            description="Deterministic figure quality checks and publication review status.",
         )
-        self._log_progress(task, f"开始调用 {config.image_model} 生成图像")
-        size = self._select_figure_image_size(task.objective, briefs)
-        image = await generate_image(
-            prompt=prompt,
-            model=config.image_model,
-            size=size,
-            quality="low",
-            output_format="png",
+        outputs = [
+            image_artifact.relative_path,
+            svg_artifact.relative_path,
+            pdf_artifact.relative_path,
+        ]
+        resolved_renderer = "matplotlib" if contract.renderer == "matplotlib" else rendered.renderer
+        asset_sources = (
+            list(rendered.render_spec.get("asset_sources", []))
+            if resolved_renderer in {"academic_svg", "drawio"}
+            else []
         )
-        image_artifact = self._write_bytes(
-            task,
-            "figures/generated/FIGURE_01.png",
-            image.image_bytes,
-            kind="image",
-            description=f"Primary generated research figure via {image.model}.",
+        if resolved_renderer in {"academic_svg", "drawio"} and not asset_sources:
+            asset_sources.append(
+                {
+                    "asset": "fallback vector primitives",
+                    "source": "project-authored",
+                    "license": "project-authored",
+                }
+            )
+        asset_sources.extend(
+            {
+                "asset": asset,
+                "source": "OpenAI ImageGen",
+                "license": "generated asset; decorative and non-canonical",
+            }
+            for asset in assist_assets
         )
-        metadata = {
-            "mode": "image2",
-            "input_files": data_sources,
-            "model": image.model,
-            "size": image.size,
-            "quality": image.quality,
-            "output_format": image.output_format,
-            "mime_type": image.mime_type,
-            "revised_prompt": image.revised_prompt,
-            "outputs": [image_artifact.relative_path],
-            "warnings": data_warnings,
-        }
-        metadata_artifact = self._write_text(
+        manifest = FigureDeliveryManifest(
+            mode="code" if resolved_renderer == "matplotlib" else resolved_renderer,
+            figure_id=contract.figure_id,
+            figure_kind=contract.kind,
+            renderer=resolved_renderer,
+            backend_skill={
+                "matplotlib": "paper-figure",
+                "academic_svg": "academic-svg",
+                "drawio": "drawio-figure",
+            }[resolved_renderer],
+            route_reason=contract.route_reason,
+            input_files=source_config.source_refs,
+            source_config=source_config,
+            contract="figures/FIGURE_CONTRACT.json",
+            visual_style="figures/VISUAL_STYLE_SPEC.json",
+            layout_plan=("" if resolved_renderer == "matplotlib" else "figures/LAYOUT_PLAN.json"),
+            authoritative_source=source_artifact.relative_path,
+            derived_outputs=outputs,
+            assist_assets=assist_assets,
+            asset_sources=asset_sources,
+            editability=contract.editability,
+            layout_engine=(
+                "not_applicable"
+                if resolved_renderer == "matplotlib"
+                else str(rendered.render_spec.get("layout_engine", "fallback_grid"))
+            ),
+            canonical=edit_banana_result is None,
+            topology_verified=edit_banana_result is None,
+            raster_inside_drawio=(
+                edit_banana_result.raster_inside_drawio if edit_banana_result else False
+            ),
+            edit_banana_called=edit_banana_result is not None,
+            vlm_called=edit_banana_result.vlm_called if edit_banana_result else False,
+            caption=contract.core_claim,
+            qa=qa_artifact.relative_path,
+            publication_status=qa["publication_status"],
+            warnings=[*warnings, *qa.get("warnings", [])],
+            wps_handoff=wps_artifact.relative_path if wps_artifact else "",
+            **route_metadata,
+        )
+        manifest_artifact = self._write_text(
             task,
             "figures/generated/FIGURE_DELIVERY.json",
-            json.dumps(metadata, ensure_ascii=False, indent=2),
+            json.dumps(manifest.model_dump(), ensure_ascii=False, indent=2),
             kind="manifest",
-            description="Traceable delivery manifest for the generated figure.",
+            description="Figure delivery manifest with canonical source, exports, provenance, and QA status.",
         )
+        for artifact in [
+            image_artifact,
+            svg_artifact,
+            pdf_artifact,
+            source_artifact,
+            qa_artifact,
+            manifest_artifact,
+        ]:
+            if artifact.relative_path not in {item.relative_path for item in generated}:
+                generated.append(artifact)
         self._log_progress(
             task,
-            f"未检测到可精确绘制的数据，已通过 {image.model} 生成科研示意图: {image_artifact.relative_path}",
+            f"已通过 {contract.renderer} 生成可编辑科研图: {image_artifact.relative_path}",
             kind="figure",
         )
         self.store.save_task(task)
-        return [prompt_artifact, image_artifact, metadata_artifact]
+        return generated
 
     async def _write_presentation_delivery_artifacts(self, task: TaskRun) -> list:
         content = self._artifact_text(task, "presentation/SLIDE_CONTENT.md")
@@ -2250,7 +3840,7 @@ class ResearchAgentService:
             if slide.render_mode == "image2_full":
                 generated_relative_path = f"presentation/generated/SLIDE_{slide.number:02d}.png"
                 generated_path = workspace_root / generated_relative_path
-                prompt = build_slide_prompt(slide, template, mode)
+                prompt = build_slide_prompt(slide, template, mode, objective=task.objective)
                 if session_context:
                     prompt = prompt + "\n\nSession context:\n" + session_context
                 prompt_artifact = self._write_text(
@@ -2276,14 +3866,14 @@ class ResearchAgentService:
                     image = await generate_image(
                         prompt=prompt,
                         model="gpt-image-2",
-                        size="1536x1024",
+                        size=PRESENTATION_IMAGE_SIZE,
                         quality="medium",
                         output_format="png",
                     )
                     generated_artifact = self._write_bytes(
                         task,
                         generated_relative_path,
-                        crop_slide_image(image.image_bytes),
+                        fit_slide_image(image.image_bytes),
                         kind="image",
                         description=f"Complete standalone Image-2 slide {slide.number}.",
                     )
@@ -2445,6 +4035,7 @@ class ResearchAgentService:
     ) -> dict:
         latest_artifacts = [artifact.model_dump() for artifact in task.artifacts[-6:]]
         session = self.store.load_session(task.session_id)
+        text = self._append_primary_delivery(text, task)
         return {
             "text": self._append_cloud_delivery_link(text, session, has_artifacts=bool(task.artifacts)),
             "task_id": task.task_id,
@@ -2457,6 +4048,27 @@ class ResearchAgentService:
             "checkpoint": checkpoint.model_dump() if checkpoint else None,
             "cloud_workspace": session.cloud_workspace.model_dump() if session else {},
         }
+
+    def _append_primary_delivery(self, text: str, task: TaskRun) -> str:
+        if task.status not in {"completed", "waiting_approval"}:
+            return text
+        paths = {artifact.relative_path for artifact in task.artifacts}
+        if task.command == "/write":
+            candidates = [
+                "paper/PAPER_REVISED.md",
+                "paper/PAPER_DRAFT.md",
+                "paper/REVISION_RATIONALE.md",
+            ]
+        elif task.command == "/review":
+            candidates = ["bib/LITERATURE_REVIEW.md", "bib/EVIDENCE_MAP.md", "bib/RETRIEVAL_QUALITY.md"]
+        elif task.command == "/rebuttal":
+            candidates = ["paper/PAPER_REVISED_AFTER_REVIEW.md", "rebuttal/REBUTTAL_DRAFT.md", "rebuttal/REVISION_LEDGER.md"]
+        else:
+            return text
+        delivered = [path for path in candidates if path in paths]
+        if not delivered:
+            return text
+        return text + "\n\n主交付件（会话工作区）：" + "、".join(f"`{path}`" for path in delivered)
 
     def _append_cloud_delivery_link(
         self,
@@ -2609,6 +4221,22 @@ class ResearchAgentService:
 
     def _write_review_delivery_artifacts(self, task: TaskRun) -> list:
         citation_audit, coverage_report = build_review_quality_reports(Path(task.artifact_root))
+        knowledge_sources = (
+            ("Research brief", "bib/RESEARCH_BRIEF.md"),
+            ("Literature retrieval", "bib/LITERATURE_SEARCH.md"),
+            ("Evidence map", "bib/EVIDENCE_MAP.md"),
+            ("Research gaps", "bib/RESEARCH_GAPS.md"),
+        )
+        knowledge_blocks = [
+            "# Session Knowledge Digest",
+            "",
+            "This is a same-session handoff for later planning and writing. It preserves the admitted evidence boundary; it is not an independent source and does not replace the cited paper records.",
+            "",
+        ]
+        for label, relative_path in knowledge_sources:
+            excerpt = self._artifact_text(task, relative_path)
+            if excerpt:
+                knowledge_blocks.extend([f"## {label}", "", excerpt[:5000].strip(), ""])
         return [
             self._write_text(
                 task,
@@ -2624,6 +4252,78 @@ class ResearchAgentService:
                 kind="review",
                 description="Review retrieval, traceability, and citation coverage report.",
             ),
+            self._write_text(
+                task,
+                "wiki/KNOWLEDGE_DIGEST.md",
+                "\n".join(knowledge_blocks).rstrip() + "\n",
+                kind="wiki",
+                description="Same-session literature and evidence handoff for downstream planning and writing.",
+            ),
+        ]
+
+    def _write_review_writing_artifacts(self, task: TaskRun) -> list:
+        workspace_root = Path(task.artifact_root)
+        payload_path = workspace_root / "bib" / "LITERATURE_SEARCH.json"
+        payload = json.loads(payload_path.read_text(encoding="utf-8")) if payload_path.exists() else {}
+        papers = payload.get("papers") if isinstance(payload.get("papers"), list) else []
+        review_path = workspace_root / "bib" / "LITERATURE_REVIEW.md"
+        review_text = review_path.read_text(encoding="utf-8", errors="ignore") if review_path.exists() else ""
+
+        def synthesis_context(paper_id: str) -> tuple[int, str]:
+            marker = f"[{paper_id}]"
+            matching_lines = [line.strip() for line in review_text.splitlines() if marker in line]
+            excerpt = next((line for line in matching_lines if not line.startswith("|") and len(line) > len(marker)), "")
+            if not excerpt and matching_lines:
+                excerpt = matching_lines[0]
+            return review_text.count(marker), excerpt[:600]
+
+        matrix = [
+            {
+                "paper_id": paper.get("paper_id", ""),
+                "title": paper.get("title", ""),
+                "year": paper.get("year", ""),
+                "venue": paper.get("venue", ""),
+                "evidence_status": paper.get("verification_status", "unknown"),
+                "citation_count": synthesis_context(str(paper.get("paper_id", "")))[0],
+                "synthesis_context": synthesis_context(str(paper.get("paper_id", "")))[1],
+                "synthesis_role": (
+                    "cited_in_thematic_synthesis"
+                    if synthesis_context(str(paper.get("paper_id", "")))[0]
+                    else "AUTHOR INPUT NEEDED"
+                ),
+            }
+            for paper in papers
+            if isinstance(paper, dict)
+        ]
+        headings = [
+            heading.strip()
+            for heading in re.findall(r"(?m)^#{2,4}\s+(.+?)\s*$", review_text)
+            if heading.strip()
+        ]
+        themes = list(dict.fromkeys(headings))[:20]
+        package = {
+            "schema_version": "literature-review-writing/v1",
+            "task_id": task.task_id,
+            "workflow_mode": task.workflow_mode,
+            "source_paper_ids": [row["paper_id"] for row in matrix if row["paper_id"]],
+            "required_artifacts": ["taxonomy", "synthesis_matrix", "section_plan", "citation_closure"],
+            "limitations": [
+                "Search inclusion/exclusion and systematic-review reporting must be supplied by an upstream evidence adapter when required.",
+                "Synthesis roles are derived from stable-ID citations in the generated review and still require semantic author verification.",
+            ],
+        }
+        taxonomy = {
+            "schema_version": "review-taxonomy/v1",
+            "topic": clean_review_topic(task.objective),
+            "axes": ["problem", "method", "data_or_context", "evidence_strength", "limitation"],
+            "review_themes": themes,
+            "paper_count": len(matrix),
+            "status": "resolved_from_review_draft" if review_text else "draft_from_retrieval_metadata",
+        }
+        return [
+            self._write_text(task, "Content/LITERATURE_REVIEW_WRITING_PACKAGE.json", json.dumps(package, ensure_ascii=False, indent=2), kind="manifest", description="Traceable input package for literature-review writing."),
+            self._write_text(task, "bib/REVIEW_TAXONOMY.json", json.dumps(taxonomy, ensure_ascii=False, indent=2), kind="plan", description="Initial literature-review taxonomy contract."),
+            self._write_text(task, "bib/SYNTHESIS_MATRIX.json", json.dumps(matrix, ensure_ascii=False, indent=2), kind="plan", description="Paper-level synthesis matrix for themed review writing."),
         ]
 
     def _write_text(self, task: TaskRun, relative_path: str, content: str, *, kind, description: str):
@@ -2649,170 +4349,6 @@ class ResearchAgentService:
         )
         self._schedule_cloud_sync(task.session_id)
         return artifact
-
-    def _record_existing(self, task: TaskRun, relative_path: str, *, kind, description: str):
-        artifact = self.artifacts.record_existing(
-            task.task_id,
-            self._canonical_artifact_path(relative_path),
-            kind=kind,
-            description=description,
-            task_root=task.artifact_root,
-        )
-        self._schedule_cloud_sync(task.session_id)
-        return artifact
-
-    def _upsert_task_artifact(self, task: TaskRun, artifact) -> None:
-        task.artifacts = [
-            existing
-            for existing in task.artifacts
-            if existing.relative_path != artifact.relative_path
-        ]
-        task.artifacts.append(artifact)
-
-    def _record_idea_trace(
-        self,
-        task: TaskRun,
-        stage: StageDefinition,
-        *,
-        selected_model: str | None,
-        elapsed_ms: float,
-        fallback_used: bool,
-        evidence_validation: dict | None,
-    ) -> None:
-        trace_path = Path(task.artifact_root) / "Content" / "IDEA_TRACE.json"
-        trace: dict = {
-            "task_id": task.task_id,
-            "orchestration": "single-herness-stage-routing",
-            "stages": [],
-        }
-        if trace_path.exists():
-            try:
-                loaded = json.loads(trace_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    trace.update(loaded)
-            except json.JSONDecodeError:
-                pass
-        stages = trace.setdefault("stages", [])
-        stages.append(
-            {
-                "stage": stage.name,
-                "model_role": stage.model_role,
-                "model": selected_model or "auto",
-                "fallback_used": fallback_used,
-                "elapsed_ms": elapsed_ms,
-                "recorded_at": utc_now(),
-            }
-        )
-        if evidence_validation is not None:
-            trace["evidence_validation"] = evidence_validation
-        trace_artifact = self._write_text(
-            task,
-            "Content/IDEA_TRACE.json",
-            json.dumps(trace, ensure_ascii=False, indent=2),
-            kind="note",
-            description="Idea stage model routing and evidence validation trace.",
-        )
-        self._upsert_task_artifact(task, trace_artifact)
-
-    def _validate_idea_evidence(self, task: TaskRun, content: str) -> tuple[str, dict]:
-        identifier_pattern = re.compile(r"\b(?:PE-[A-F0-9]{10}|P\d{3}|P-[A-F0-9]{12})\b", re.I)
-        workspace_root = Path(task.artifact_root)
-        evidence_paths = [
-            workspace_root / "bib" / "EVIDENCE_MAP.md",
-            workspace_root / "bib" / "LITERATURE_REVIEW.md",
-            workspace_root / "bib" / "LITERATURE_SEARCH.md",
-            workspace_root / "wiki" / "query_pack.md",
-        ]
-        evidence_paths.extend((workspace_root / "wiki" / "papers").glob("*/summary.md"))
-        allowed_ids: set[str] = set()
-        evidence_pages: dict[str, int] = {}
-        for path in evidence_paths:
-            if not path.exists():
-                continue
-            evidence_text = path.read_text(encoding="utf-8", errors="ignore")
-            allowed_ids.update(identifier.upper() for identifier in identifier_pattern.findall(evidence_text))
-            for match in re.finditer(
-                r"(?P<id>PE-[A-F0-9]{10})(?:[^\n\]]{0,40}?)(?:p\.?\s*|第\s*)(?P<page>\d+)(?:\s*页)?",
-                evidence_text,
-                re.I,
-            ):
-                evidence_pages.setdefault(match.group("id").upper(), int(match.group("page")))
-        referenced_ids = {
-            identifier.upper() for identifier in identifier_pattern.findall(content)
-        }
-        invalid_ids = sorted(referenced_ids - allowed_ids)
-        validated_content = content
-        for invalid_id in invalid_ids:
-            validated_content = re.sub(
-                rf"\b{re.escape(invalid_id)}\b",
-                f"UNVERIFIED({invalid_id})",
-                validated_content,
-                flags=re.I,
-            )
-        for evidence_id, page in evidence_pages.items():
-            validated_content = re.sub(
-                rf"\[\s*{re.escape(evidence_id)}\s*\]",
-                f"[{evidence_id}, p.{page}]",
-                validated_content,
-                flags=re.I,
-            )
-        page_linked_ids = sorted(
-            evidence_id
-            for evidence_id in referenced_ids
-            if evidence_id.startswith("PE-")
-            and re.search(
-                rf"{re.escape(evidence_id)}(?:[^\n\]]{{0,30}}?)(?:p\.?\s*\d+|第\s*\d+\s*页)",
-                validated_content,
-                re.I,
-            )
-        )
-        unpaged_ids = sorted(
-            evidence_id
-            for evidence_id in referenced_ids
-            if evidence_id.startswith("PE-") and evidence_id not in page_linked_ids
-        )
-        status = "pass"
-        if invalid_ids:
-            status = "needs_attention"
-            validated_content = (
-                validated_content.rstrip()
-                + "\n\n## Evidence Validation\n\n"
-                + "- Status: needs attention\n"
-                + "- 以下编号未出现在当前证据包中，已标记为未验证："
-                + ", ".join(f"`{identifier}`" for identifier in invalid_ids)
-                + "\n"
-            )
-        elif not referenced_ids:
-            status = "no_explicit_evidence_ids"
-        elif unpaged_ids:
-            status = "needs_attention"
-        return validated_content, {
-            "status": status,
-            "allowed_ids": sorted(allowed_ids),
-            "referenced_ids": sorted(referenced_ids),
-            "invalid_ids": invalid_ids,
-            "page_linked_ids": page_linked_ids,
-            "unpaged_ids": unpaged_ids,
-        }
-
-    @staticmethod
-    def _normalize_generated_markdown(content: str, required_sections: list[str]) -> str:
-        normalized = content.strip()
-        outer_fence = re.fullmatch(r"```(?:markdown|md)?\s*\n(.*?)\n```", normalized, re.I | re.S)
-        if outer_fence:
-            normalized = outer_fence.group(1).strip()
-        variants = re.split(r"\n```(?:markdown|md)\s*\n(?=#)", normalized, flags=re.I)
-        candidates: list[tuple[int, int, str]] = []
-        for variant in variants:
-            cleaned = re.sub(r"\n```\s*$", "", variant.strip()).strip()
-            section_count = sum(
-                bool(re.search(rf"(?mi)^##+\s*{re.escape(section)}(?:\s|$)", cleaned))
-                for section in required_sections
-            )
-            candidates.append((section_count, -len(cleaned), cleaned))
-        if candidates:
-            normalized = max(candidates)[2]
-        return normalized.rstrip() + "\n"
 
     def _schedule_cloud_sync(self, session_id: str) -> None:
         if not config.cloud_sync_enabled:
@@ -2862,22 +4398,40 @@ class ResearchAgentService:
     def _build_stage_prompt(
         self, task: TaskRun, workflow: WorkflowDefinition, stage: StageDefinition, revision_feedback: str
     ) -> dict[str, str]:
-        skill_context = self._skill_context(stage.skill_paths)
-        lightweight_workflow = task.command in {"/wiki", "/idea"}
-        prd_context = "" if lightweight_workflow else self._file_excerpt(config.prd_path, 5000)
-        tech_context = "" if lightweight_workflow else self._file_excerpt(config.tech_spec_path, 5000)
+        skill_paths = self._effective_stage_skill_paths(task, stage)
+        skill_context = self._skill_context(skill_paths)
+        stage_instruction, required_sections = self._stage_contract(task, stage)
+        writing_style_context = (
+            build_writing_style_context(
+                task.objective,
+                load_workspace_venue_style_card(Path(task.artifact_root)),
+            )
+            if task.command in {"/review", "/write", "/rebuttal"}
+            else ""
+        )
+        writing_length_contract = extract_writing_length_contract(task.objective)
+        length_guidance = ""
+        if stage.name in {"literature_synthesis", "paper_plan", "draft_sections", "paper_revision"}:
+            length_guidance = build_writing_length_guidance(task.objective)
+        review_budget_hint = (
+            "Section budget for the primary review:\n" + length_guidance + "\n\n"
+            if stage.name == "literature_synthesis" and length_guidance
+            else ("Document and section length guidance:\n" + length_guidance + "\n\n" if length_guidance else "")
+        )
+        citation_closure_hint = (
+            "Citation closure: cite each source-grounded factual claim in the paragraph where it appears, using only "
+            "admitted stable IDs, local source paths, or bibliography keys. A reference-list entry alone does not support "
+            "a claim. Do not list unused references.\n\n"
+            if task.command in {"/review", "/write", "/rebuttal"}
+            else ""
+        )
+        prd_context = self._file_excerpt(config.prd_path, 5000)
+        tech_context = self._file_excerpt(config.tech_spec_path, 5000)
         session_context = self._session_context_for_task(task)
-        prior_artifact_sections: list[str] = []
-        for artifact in reversed(task.artifacts):
-            if not self._is_prompt_text_artifact(artifact.relative_path):
-                continue
-            excerpt = self._artifact_excerpt(task, artifact.relative_path)
-            if not excerpt:
-                continue
-            prior_artifact_sections.append(f"### {artifact.relative_path}\n{excerpt}")
-            if len(prior_artifact_sections) == 4:
-                break
-        prior_artifacts = "\n\n".join(reversed(prior_artifact_sections))
+        prior_artifacts = "\n\n".join(
+            f"### {artifact.relative_path}\n{self._artifact_excerpt(task, artifact.relative_path)}"
+            for artifact in task.artifacts[-4:]
+        )
         write_output_hint = ""
         if task.command == "/write":
             write_output_hint = (
@@ -2885,6 +4439,18 @@ class ResearchAgentService:
                 + ", ".join(detect_write_formats(task.objective))
                 + ". Structure the draft so it can be exported cleanly.\n\n"
             )
+            requested_sections, inferred_section = _delivery_sections(task)
+            if requested_sections:
+                write_output_hint += (
+                    "Draft only these requested or inferred section(s): " + ", ".join(requested_sections) + ". "
+                    "Follow the matching section guidance, use the user's requested language, and do not expand into a full paper. "
+                    "If the source is a research plan, keep proposed work prospective rather than presenting it as completed results.\n\n"
+                )
+            elif inferred_section and inferred_section.get("confidence") == "low":
+                write_output_hint += (
+                    "The input's section could not be identified confidently. Preserve the supplied structure and polish only "
+                    "the requested passage; do not impose an abstract, methods, or other section template.\n\n"
+                )
         checkpoint_hint = ""
         if stage.hitl:
             checkpoint_hint = (
@@ -2897,46 +4463,6 @@ class ResearchAgentService:
                 "'Option A: ...' and 'Option B: ...', and 'Recommended Default: ...'. Missing fields cause the workflow to "
                 "choose its recommendation and continue automatically.\n\n"
             )
-        language_hint = ""
-        if re.search(r"[\u4e00-\u9fff]", task.objective):
-            language_hint = (
-                "Output language policy: write all explanatory prose in clear Simplified Chinese. "
-                "Keep the required section headings exactly as provided so validation remains stable, "
-                "but do not write English paragraphs. English is allowed only for proper nouns, model or dataset names, "
-                "formulas, code, paths, and evidence identifiers.\n\n"
-            )
-        artifact_budget_hint = ""
-        if task.command == "/idea":
-            stage_budgets = {
-                "idea_candidates": "3,500",
-                "idea_verification": "2,500",
-                "final_idea": "4,800",
-            }
-            budget = stage_budgets.get(stage.name, "2,600")
-            artifact_budget_hint = (
-                f"Artifact budget: keep the complete artifact within about {budget} Chinese characters. "
-                "Return exactly one Markdown document and never wrap the whole artifact in a code fence. "
-                "Do not repeat prior artifacts. Do not claim 'first', 'state of the art', complete novelty, "
-                "or preservation of the original theory unless the supplied evidence directly proves that claim. "
-                "Every factual or numeric claim must cite an Evidence ID with page, or be labeled 未确认. "
-                "Do not assign symbols, formulas, datasets, or parameter meanings that are absent from the evidence.\n\n"
-            )
-        final_idea_writing_hint = ""
-        if task.command == "/idea" and stage.name == "final_idea":
-            final_idea_writing_hint = (
-                "Final Idea reader profile: the document will be read by strong graduate and doctoral researchers who need "
-                "to understand the idea quickly and judge whether it is worth developing. Write professionally but do not use "
-                "dense slogan-like phrases. Use the exact Chinese headings below. Start each section with a direct conclusion, "
-                "then explain the reasoning in plain academic Chinese. The first section must contain a one-sentence Idea and "
-                "a short plain-language explanation. The gap section must say whether the gap is author-explicit or an "
-                "evidence-backed inference. The method section must explain the mechanism, why it may work, and which parts are "
-                "still assumptions. The innovation section must keep one dominant contribution and avoid a shopping list. The "
-                "evidence section should map key claims to Evidence IDs and page numbers. The risk section must include the "
-                "strongest plausible rejection argument and the condition under which the idea should be abandoned. Use short "
-                "paragraphs, bullets, or a small table only when they improve readability. Do not repeat the Wiki summary or "
-                "write a full experiment plan. Use only the nine required Chinese sections after the title. Do not mention "
-                "skills, prompts, agents, execution metadata, or add a separate plain-language summary after the last section.\n\n"
-            )
         user_prompt = (
             f"Workflow: {workflow.title}\n"
             f"Command: {task.command}\n"
@@ -2945,33 +4471,42 @@ class ResearchAgentService:
             f"Route source: {task.route_source}\n\n"
             + (
                 "Applied ARIS skills:\n"
-                + "\n".join(f"- {name}" for name in self._skill_names(stage.skill_paths))
+                + "\n".join(f"- {name}" for name in self._skill_names(skill_paths))
                 + "\n\n"
-                if stage.skill_paths
+                if skill_paths
                 else ""
             )
             + write_output_hint
             + checkpoint_hint
-            + language_hint
-            + artifact_budget_hint
-            + final_idea_writing_hint
-            + f"Stage instruction:\n{stage.instruction}\n\n"
+            + f"Stage instruction:\n{stage_instruction}\n\n"
+            + (
+                f"Discipline writing guidance:\n{writing_style_context}\n\n"
+                if writing_style_context
+                else ""
+            )
+            + (
+                "Writing length contract: "
+                f"{writing_length_contract['minimum']}–{writing_length_contract['maximum']} "
+                f"{writing_length_contract['unit']}. Stay within this range for the requested primary deliverable; "
+                "do not add generic filler to reach the target.\n\n"
+                if writing_length_contract
+                else ""
+            )
+            + review_budget_hint
+            + citation_closure_hint
             + "Required sections:\n"
-            + "\n".join(f"- {section}" for section in stage.required_sections)
+            + "\n".join(f"- {section}" for section in required_sections)
             + "\n\n"
             + (f"Relevant prior session context:\n{session_context}\n\n" if session_context else "")
             + (f"Revision feedback to incorporate:\n{revision_feedback}\n\n" if revision_feedback else "")
             + (f"Recent artifacts:\n{prior_artifacts}\n\n" if prior_artifacts else "")
             + "Return only the markdown for the artifact file. Keep it concrete, honest, and execution-oriented."
         )
-        specification_context = ""
-        if prd_context or tech_context:
-            specification_context = (
-                f"PRD excerpt:\n{prd_context}\n\n"
-                f"Tech spec excerpt:\n{tech_context}\n\n"
-            )
         system_prompt = (
             "You are the orchestration core of a research agent platform. "
+            "For this generation call you have no tools and cannot inspect the filesystem; all usable evidence is already "
+            "included in the prompt. Never narrate actions, request tool calls, emit tool-call syntax, or include hidden "
+            "protocol text. Return the artifact itself, beginning with its markdown title. "
             "You must follow the PRD and tech-spec constraints, use the ARIS skill patterns as execution guidance, "
             "and produce file-ready markdown artifacts. Separate assumptions from grounded facts, use human checkpoints only for genuine user decisions, "
             "and optimize for local collaboration with a human researcher. "
@@ -2984,21 +4519,107 @@ class ResearchAgentService:
             "additional top-level directories. Use wiki/ for session memory and task notes. Use Content/ only for context, "
             "progress records, checkpoints, prompts, traceability metadata, and manifests. When mentioning output paths in an "
             "artifact, use paths relative to the session root. "
-            + language_hint
-            + f"{CLOUD_DELIVERY_SYSTEM_POLICY}\n\n"
-            + specification_context
-            + f"Relevant ARIS guidance:\n{skill_context}\n"
+            f"{CLOUD_DELIVERY_SYSTEM_POLICY}\n\n"
+            f"PRD excerpt:\n{prd_context}\n\n"
+            f"Tech spec excerpt:\n{tech_context}\n\n"
+            f"Relevant ARIS guidance:\n{skill_context}\n"
         )
         return {"system": system_prompt, "user": user_prompt}
+
+    @staticmethod
+    def _effective_stage_skill_paths(task: TaskRun, stage: StageDefinition) -> list[str]:
+        requested = set(task.skill_bundle)
+        specialized_paths = [
+            f"skills/{name}/SKILL.md"
+            for name in PAPER_AGENT_STAGE_SKILLS.get(stage.name, ())
+            if name in requested
+        ]
+        return list(dict.fromkeys([*specialized_paths, *stage.skill_paths]))
+
+    @staticmethod
+    def _stage_contract(task: TaskRun, stage: StageDefinition) -> tuple[str, list[str]]:
+        document_type = str(build_writing_context(task.objective, [], {}).get("document_type", ""))
+        if task.command == "/review" and stage.name == "literature_synthesis":
+            is_chinese = str(build_writing_context(task.objective, [], {}).get("language", "en")) == "zh"
+            is_systematic = bool(re.search(r"systematic review|meta-analysis|系统综述|元分析", task.objective, re.I))
+            if is_chinese:
+                sections = (
+                    ["摘要", "关键词", "引言", "方法", "结果", "讨论", "结论", "参考文献"]
+                    if is_systematic
+                    else ["摘要", "关键词", "引言", "综述范围与方法", "主题综合", "讨论", "结论", "参考文献"]
+                )
+            else:
+                sections = (
+                    ["Abstract", "Keywords", "Introduction", "Methods", "Results", "Discussion", "Conclusion", "References"]
+                    if is_systematic
+                    else ["Abstract", "Keywords", "Introduction", "Review Scope and Approach", "Thematic Synthesis", "Discussion", "Conclusion", "References"]
+                )
+            review_kind = "systematic review" if is_systematic else "narrative or thematic review"
+            return (
+                stage.instruction
+                + f"\n\nPrimary-deliverable contract: produce a formal {review_kind} manuscript, not an evidence-package "
+                "report. The abstract is an article abstract, not an executive summary. State the review scope and approach "
+                "truthfully from the admitted corpus; do not invent database dates, screening counts, bias assessments, or a "
+                "PRISMA process. A systematic-review table belongs in the main body only when the user requested a systematic "
+                "review and the admitted evidence supports it. Do not include headings or prose labelled Paper Evidence Table, "
+                "Evidence and Citation Audit, Research Landscape, Foundational and Recent Work, Baselines and Metrics, provider "
+                "status, download status, or platform limitations. Those are separate traceability artifacts.\n\n"
+                "For a narrative review, organize the body around a small number of substantive themes, then use Discussion "
+                "to resolve agreement, disagreement, limitations, research implications and boundaries. For a systematic review, "
+                "make the actual search, selection, appraisal and synthesis evidence auditable without fabricating any missing "
+                "step. The admitted record fields are exhaustive: do not add event counts, site counts, climate labels, dates, "
+                "residence times, QA/QC procedures, maintenance histories, titles, authors, venues, DOIs, years, or URLs unless "
+                "the exact field is present in the admitted records. If a field is absent, say it was not supplied in the admitted "
+                "package. Do not create a reference entry from a stable ID alone, and do not use golden:// or other synthetic URLs. "
+                "Keep [AUTHOR INPUT NEEDED] out of the reader-facing manuscript.",
+                sections,
+            )
+        if task.command == "/write" and stage.name in {"draft_sections", "paper_revision"}:
+            requested_sections = _requested_write_sections(task.objective)
+            if requested_sections:
+                prospective = _is_plan_derived_section_request(task.objective)
+                status_rule = (
+                    " If the source is a research plan, preserve prospective status and do not present proposed work as completed results."
+                    if prospective
+                    else " Preserve the source's factual status, numbers, citations, and uncertainty."
+                )
+                return (
+                    stage.instruction
+                    + "\n\nSection-delivery contract: the user explicitly requested only: "
+                    + ", ".join(requested_sections)
+                    + ". Follow the corresponding section guidance and return only those section(s), not a full manuscript, "
+                    "diagnosis, outline, change log, or unrelated IMRAD headings."
+                    + status_rule,
+                    requested_sections,
+                )
+        if task.command == "/write" and document_type == "degree_thesis_section":
+            if stage.name in {"draft_sections", "paper_revision"}:
+                return (
+                    stage.instruction
+                    + "\n\nDegree-thesis section contract: this is a chapter or research-framework revision, not a journal article. "
+                    "Preserve the source hierarchy and research logic. Return the revised source text only in the requested native "
+                    "heading style. Put diagnosis, change rationale and unresolved author inputs in the separate self-review and "
+                    "revision-audit artifacts, never before or after the revised prose. Do not add Abstract, Introduction, Method, "
+                    "Results, Conclusion, or References unless they are part of the supplied source section.",
+                    [],
+                )
+            if stage.name == "narrative_report":
+                return (
+                    "Analyze the supplied thesis chapter or framework before revision. Preserve its hierarchy, identify only "
+                    "evidence-supported structural gaps, and list needed author inputs. Do not create a journal-paper narrative.",
+                    ["既有研究逻辑", "结构诊断", "证据边界", "待补材料"],
+                )
+        return stage.instruction, stage.required_sections
 
     async def _build_figure_render_prompt(self, task: TaskRun, inventory: str, briefs: str) -> str:
         session_context = self._session_context_for_task(task)
         manuscript = self._artifact_text(task, "paper/PAPER_REVISED.md") or self._artifact_text(task, "paper/PAPER_DRAFT.md")
         manuscript_block = f"Current paper excerpt:\n{manuscript[:4000]}\n\n" if manuscript else ""
         system_prompt = (
-            "You convert research figure plans into a single production-ready gpt-image-2 prompt. "
+            "You convert research figure plans into a text-free visual moodboard prompt for optional ImageGen assistance. "
             "Return plain prompt text only, no markdown, no bullets. "
-            "Prefer clean academic diagrams, short English labels, high readability, white background, and publication-friendly layout. "
+            "Prefer clean academic styling, restrained colorful icon motifs, white background, and publication-friendly visual hierarchy. "
+            "Do not request labels, arrows, numbers, charts, or scientific structure; those are rebuilt as native editable objects. "
             "If this task belongs to an ongoing session with prior paper, review, plan, or code work, keep the same topic, "
             "claims, terminology, and visual framing instead of inventing a new subject from the figure command alone."
         )
@@ -3012,7 +4633,7 @@ class ResearchAgentService:
             f"Figure inventory:\n{inventory}\n\n"
             f"Figure briefs:\n{briefs[:6000]}\n\n"
             "Choose the single highest-value figure to render first. "
-            "Describe composition, visual hierarchy, color palette, labels, arrows, panel structure, and style constraints clearly enough for image generation. "
+            "Describe visual hierarchy, color palette, panel atmosphere, icon language, and style constraints clearly enough for a moodboard. "
             "When prior session context exists, inherit its topic and evidence rather than defaulting to a generic workflow diagram."
         )
         content = await generate_text(
@@ -3024,9 +4645,9 @@ class ResearchAgentService:
         if prompt:
             return prompt
         fallback = (
-            f"Create a clean academic research figure for: {task.objective}. "
-            "Use a white background, blue and slate accents, clear panel layout, thin arrows, short English labels, and publication-ready typography. "
-            "Make it look like a polished systems or workflow diagram rather than marketing art."
+            f"Create a text-free academic visual moodboard for: {task.objective}. "
+            "Use a white background, restrained accents, playful flat icon motifs, and subtle panel textures. "
+            "Do not include labels, arrows, numbers, charts, or scientific claims."
         )
         return fallback
 
@@ -3167,6 +4788,27 @@ class ResearchAgentService:
                 description="Deterministic paper structure, evidence, citation, and compile delivery gate.",
             )
         )
+        original = self._artifact_text(task, "paper/PAPER_DRAFT.md")
+        if original and manuscript:
+            artifacts.append(
+                self._write_text(
+                    task,
+                    "paper/REVISION_AUDIT.json",
+                    json.dumps(build_revision_audit(original, manuscript), ensure_ascii=False, indent=2),
+                    kind="review",
+                    description="Deterministic revision preservation audit.",
+                )
+            )
+            review = self._artifact_text(task, "paper/PAPER_SELF_REVIEW.md")
+            artifacts.append(
+                self._write_text(
+                    task,
+                    "paper/REVISION_RATIONALE.md",
+                    build_revision_rationale(original, manuscript, review),
+                    kind="review",
+                    description="Author-facing rationale for wording and structure changes, grounded in the manuscript review.",
+                )
+            )
         return artifacts
 
     def _write_rebuttal_delivery_artifacts(self, task: TaskRun) -> list:
@@ -3398,30 +5040,10 @@ class ResearchAgentService:
         return file_path.read_text(encoding="utf-8", errors="ignore")[:limit]
 
     def _artifact_excerpt(self, task: TaskRun, relative_path: str) -> str:
-        if not self._is_prompt_text_artifact(relative_path):
-            return ""
         target = self._artifact_path(task, relative_path)
         if not target.exists():
             return ""
         return target.read_text(encoding="utf-8", errors="ignore")[:4000]
-
-    @staticmethod
-    def _is_prompt_text_artifact(relative_path: str) -> bool:
-        return Path(relative_path).suffix.lower() in {
-            ".bib",
-            ".csv",
-            ".enw",
-            ".json",
-            ".jsonl",
-            ".md",
-            ".nbib",
-            ".ris",
-            ".tex",
-            ".tsv",
-            ".txt",
-            ".yaml",
-            ".yml",
-        }
 
     def _artifact_text(self, task: TaskRun, relative_path: str) -> str:
         target = self._artifact_path(task, relative_path)

@@ -128,9 +128,11 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     title="Idea Candidates",
                     instruction=(
                         "Use the user's objective and any /review evidence in the session to generate three distinct research "
-                        "ideas. When no literature review exists, perform only the targeted novelty search supplied in context. "
+                        "ideas after reading Evidence Coverage and the Cross-Paper Evidence Matrix. When no literature review "
+                        "exists, perform only the targeted novelty search supplied in context. "
                         "For each idea state the problem, mechanism, novelty thesis, expected contribution, feasibility, and main "
-                        "risk. Do not write an experiment plan. Recommend one candidate and continue automatically. Use a blocking "
+                        "risk. Also identify supporting Paper IDs and Evidence IDs, possible author Future Work overlap, the closest "
+                        "prior work, and the concrete difference. Do not write an experiment plan. Recommend one candidate and continue automatically. Use a blocking "
                         "Decision Required only when directions entail materially different scope, cost, risk, or external commitments "
                         "that cannot be resolved from evidence; ordinary topic preferences are not blocking."
                     ),
@@ -145,7 +147,14 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Decision Required",
                     ],
                     skill_paths=_skills(
-                        "platform-idea-generation",
+                        "idea-discovery",
+                        "prior-art-search",
+                        "openalex",
+                        "semantic-scholar",
+                        "arxiv",
+                        "deepxiv",
+                        "comm-lit-review",
+                        "novelty-check",
                     ),
                     model_role="idea_generator",
                     hitl=True,
@@ -157,7 +166,8 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Act as an independent critic of the recommended or user-selected candidate. Test the novelty claim "
                         "against the supplied literature, identify the closest prior work, search for disconfirming evidence, "
-                        "evaluate feasibility and falsifiability, and state what remains uncertain. Do not expand this into a "
+                        "check whether it only repeats author Future Work or an already implemented method, evaluate cross-paper "
+                        "support, feasibility and falsifiability, and state what remains uncertain. Do not expand this into a "
                         "full experiment plan."
                     ),
                     artifact_path="idea/IDEA_VERIFICATION.md",
@@ -172,7 +182,11 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Verification Verdict",
                     ],
                     skill_paths=_skills(
-                        "platform-idea-critique",
+                        "novelty-check",
+                        "prior-art-search",
+                        "kill-argument",
+                        "research-review",
+                        "idea-discovery-robot",
                     ),
                     model_role="idea_critic",
                 ),
@@ -180,28 +194,29 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     name="final_idea",
                     title="Final Idea",
                     instruction=(
-                        "Consolidate the locked candidate and verification findings into a professional, readable Chinese "
-                        "research Idea for graduate and doctoral researchers. Explain why the problem matters, what the closest "
-                        "evidence-backed gap is, how the proposed mechanism addresses it, what the dominant contribution is, and "
-                        "how the idea could be falsified. Keep facts, evidence-backed inference, and unverified assumptions "
-                        "clearly separated. Preserve evidence caveats and hand only high-level validation requirements to /plan "
-                        "instead of drafting a complete experiment plan."
+                        "Consolidate the chosen candidate and verification findings into a concise final research idea that can "
+                        "be handed to /plan. Preserve evidence caveats, define the problem anchor, method thesis, dominant "
+                        "contribution, falsifiable prediction, scope boundary, and unresolved risks. If evidence coverage, the "
+                        "cross-paper difference, or falsifiability is insufficient, retain a blocked_preliminary status rather "
+                        "than overclaiming novelty."
                     ),
                     artifact_path="idea/FINAL_IDEA.md",
                     artifact_kind="report",
                     required_sections=[
-                        "一句话研究 Idea",
-                        "研究背景与核心问题",
-                        "现有研究不足与可切入空白",
-                        "核心假设与方法思路",
-                        "预期创新与学术价值",
-                        "可证伪预测",
-                        "证据依据",
-                        "适用边界、风险与不确定性",
-                        "交给实验方案模块的下一步",
+                        "Problem Anchor",
+                        "Method Thesis",
+                        "Dominant Contribution",
+                        "Falsifiable Prediction",
+                        "Evidence Basis",
+                        "Scope Boundary",
+                        "Open Risks",
+                        "Handoff to Plan",
                     ],
                     skill_paths=_skills(
-                        "platform-idea-finalization",
+                        "research-refine",
+                        "invention-structuring",
+                        "claims-drafting",
+                        "research-review",
                     ),
                     model_role="idea_finalizer",
                 ),
@@ -291,59 +306,85 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
         "/fig": WorkflowDefinition(
             command="/fig",
             title="Figure Generation Workflow",
-            description="Generate a finished research figure from explicit data or with gpt-image-2.",
+            description="Generate one evidence-grounded research figure with a canonical editable source.",
             stage_definitions=[
                 StageDefinition(
-                    name="figure_inventory",
-                    title="Figure Inventory",
+                    name="figure_contract",
+                    title="Figure Contract",
                     instruction=(
-                        "Identify the single highest-value final figure and its evidence dependencies. Inspect the supplied "
-                        "workspace context. If explicit tabular data is available, require a precise code-rendered chart; "
-                        "otherwise specify a scientific illustration suitable for gpt-image-2."
+                        "Freeze the figure purpose, scientific claim, entities, directed relations, label allowlist, evidence "
+                        "sources, target format, and exactly one route: data plot, framework diagram, mechanism diagram, or "
+                        "reference reproduction. Data availability alone must never override explicit diagram intent."
                     ),
-                    artifact_path="figures/FIGURE_INVENTORY.md",
-                    artifact_kind="report",
+                    artifact_path="figures/FIGURE_CONTRACT.json",
+                    artifact_kind="contract",
                     required_sections=[
-                        "Required Figures",
-                        "Data Dependencies",
-                        "Narrative Purpose",
-                        "Priority Order",
-                        "Render Mode",
+                        "Figure Kind",
+                        "Evidence Sources",
+                        "Entities and Relations",
+                        "Label Allowlist",
+                        "Renderer",
                     ],
-                    skill_paths=_skills(
-                        "paper-figure",
-                        "figure-spec",
-                        "figure-description",
-                        "mermaid-diagram",
-                        "paper-illustration-image2",
-                    ),
+                    skill_paths=_skills("figure-orchestrator"),
+                    hitl=True,
+                    checkpoint_title="Confirm Figure Contract",
                 ),
                 StageDefinition(
-                    name="figure_briefs",
-                    title="Figure Briefs",
+                    name="figure_design",
+                    title="Figure Design",
                     instruction=(
-                        "Write a production brief for the selected final figure. Declare exactly one render mode: `code` "
-                        "for explicit numeric data or `image2` for a scientific illustration. For code mode name the "
-                        "source file, columns, chart type, axes, units, and caption. For image2 mode define composition, "
-                        "labels, visual hierarchy, and scientific constraints."
+                        "Convert the approved FigureContract into one VisualStyleSpec and a renderer-neutral LayoutPlan. "
+                        "Framework and mechanism affect templates and icon density, not the backend. Keep all structural "
+                        "text, nodes, panels, and arrows editable."
                     ),
-                    artifact_path="figures/FIGURE_BRIEFS.md",
+                    artifact_path="figures/VISUAL_STYLE_SPEC.json",
                     artifact_kind="plan",
                     required_sections=[
-                        "Per-Figure Brief",
-                        "Data Fields",
-                        "Design Notes",
-                        "Caption Drafts",
-                        "Render Mode",
+                        "Preset",
+                        "Palette",
+                        "Typography",
+                        "Icons and Hatching",
+                        "Arrows and Panels",
                     ],
-                    skill_paths=_skills(
-                        "paper-figure",
-                        "figure-spec",
-                        "figure-description",
-                        "paper-illustration",
-                        "paper-illustration-image2",
-                        "render-html",
+                    skill_paths=_skills("figure-orchestrator"),
+                ),
+                StageDefinition(
+                    name="figure_render_and_qa",
+                    title="Figure Render and QA",
+                    instruction=(
+                        "Measure text using the resolved font, run ELK with deterministic fallback, create one shared "
+                        "DiagramRenderSpec, invoke exactly one selected renderer, and run semantic, geometry, typography, "
+                        "contrast, connector, and provenance checks. Image generation is opt-in only."
                     ),
+                    artifact_path="figures/generated/FIGURE_QA.json",
+                    artifact_kind="manifest",
+                    required_sections=[
+                        "Hard Status",
+                        "Semantic Checks",
+                        "Geometry Checks",
+                        "Warnings",
+                        "Publication Status",
+                    ],
+                    skill_paths=_skills("figure-orchestrator"),
+                ),
+                StageDefinition(
+                    name="figure_delivery",
+                    title="Figure Delivery",
+                    instruction=(
+                        "Deliver PNG, SVG, PDF, the authoritative editable source, QA report, and FigureDeliveryManifest v3. "
+                        "Declare the canonical source and keep publication status at needs_human_visual_review until a person "
+                        "has inspected the final-size preview."
+                    ),
+                    artifact_path="figures/generated/FIGURE_DELIVERY.json",
+                    artifact_kind="manifest",
+                    required_sections=[
+                        "Renderer and Route",
+                        "Inputs",
+                        "Canonical Source",
+                        "Derived Outputs",
+                        "QA and Warnings",
+                    ],
+                    skill_paths=_skills("figure-orchestrator"),
                 ),
             ],
         ),
@@ -506,7 +547,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Revise PAPER_DRAFT.md using every issue in PAPER_SELF_REVIEW.md. Make the smallest evidence-supported "
                         "change that resolves each issue, preserve facts, numbers, equations, citations, figure/table references, "
-                        "and provenance, and retain unresolved scientific gaps as [AUTHOR INPUT NEEDED]. Return the complete "
+                        "and provenance, and retain unresolved scientific gaps as [AUTHOR INPUT NEEDED]. When comparative "
+                        "uncertainty is unavailable, report only the observed mean difference rather than stable outperformance "
+                        "or component contribution. Return the complete "
                         "revised manuscript, not a change summary."
                     ),
                     artifact_path="paper/PAPER_REVISED.md",
@@ -531,6 +574,14 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "claims-drafting",
                     ),
                 ),
+                StageDefinition(
+                    name="final_quality_gate",
+                    title="Publication Quality Gate",
+                    instruction="This stage is generated deterministically by the platform.",
+                    artifact_path="paper/FINAL_GATE_REPORT.json",
+                    artifact_kind="review",
+                    required_sections=["Decision", "Checks"],
+                ),
             ],
         ),
         "/review": WorkflowDefinition(
@@ -543,7 +594,10 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     title="Research Brief",
                     instruction=(
                         "Turn the user's request into a bounded, reproducible retrieval protocol before any external search. "
-                        "Define the research question, review type, technical concept groups, time range, publication policy, "
+                        "First write a Clarified Scope that makes explicit the research object, core questions, concept boundary, "
+                        "methods or application context, time/language/publication range, and inclusion/exclusion defaults. "
+                        "When ambiguity would materially change scope or cost, add a blocking Decision Required section with "
+                        "specific adaptive questions; otherwise continue with conservative defaults. Define the research question, review type, technical concept groups, time range, publication policy, "
                         "and explicit inclusion/exclusion criteria. Under Search Strategy, provide exactly 4-6 query variants "
                         "as standalone lines `Q1: ...` through `Q6: ...`: include the core topic, canonical English terminology, "
                         "domain aliases, a recent-review query, and a foundational-work query. Plan a recent/foundational split. "
@@ -553,6 +607,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     artifact_kind="report",
                     required_sections=[
                         "Research Question",
+                        "Clarified Scope",
                         "Scope",
                         "Concept Groups",
                         "Search Strategy",
@@ -570,30 +625,66 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "deepxiv",
                         "comm-lit-review",
                     ),
+                    hitl=True,
+                    checkpoint_title="Review Scope Confirmation",
+                ),
+                StageDefinition(
+                    name="review_section_plan",
+                    title="Review Section Plan",
+                    instruction=(
+                        "Build a compact, evidence-grounded writing plan before drafting the review. Assign every required "
+                        "review section a unique job, a proportional word or character budget when the user specified a "
+                        "length, and the admitted stable IDs or local sources it must use. State which observations must not "
+                        "be repeated across sections. Preserve all material conditions, unresolved unknowns, and citation "
+                        "boundaries. This is a planning artifact, not prose for the final review."
+                    ),
+                    artifact_path="bib/REVIEW_SECTION_PLAN.md",
+                    artifact_kind="plan",
+                    required_sections=[
+                        "Target Length and Budget",
+                        "Section Responsibilities",
+                        "Evidence Assignment",
+                        "Non-duplication Rules",
+                        "Boundary Preservation",
+                    ],
+                    skill_paths=_skills(
+                        "paper-literature-review",
+                        "paper-style-learn",
+                        "paper-draft",
+                    ),
                 ),
                 StageDefinition(
                     name="literature_synthesis",
                     title="Literature Synthesis",
                     instruction=(
-                        "Use only the admitted retrieval records and extracted local literature. Start with a paper evidence table "
-                        "covering stable ID or local path, year, venue/status, problem, method, data or scenario, key finding, "
-                        "limitation, evidence depth, and relevance. Then synthesize by technical axis rather than search order, "
-                        "separating foundational from recent work and formal publications from preprints. Compare methods, datasets, "
-                        "baselines, metrics, contradictions, and deployment evidence. Every paper-level factual statement must cite "
-                        "a supplied stable ID such as [P001], or an exact local source path with page when available. Distinguish "
-                        "metadata/abstract evidence from full-text evidence. Provider failures are retrieval limitations, never domain facts."
+                        "Write a reader-ready literature review article from only the admitted retrieval records and extracted local "
+                        "literature. Follow the formal article contract selected for the requested review type and language. Choose "
+                        "thematic subsections from the evidence and review question rather than a fixed field template. Compare the "
+                        "axes that materially explain agreement or conflict; omit an inapplicable axis instead of filling prose with "
+                        "missing-metadata statements. In Review Scope and Approach, include a traceable retrieval scope summary and "
+                        "state every material condition, assumption, or boundary that limits interpretation. Every paper-level factual statement must cite a supplied stable ID such as [P001], "
+                        "or an exact local source path with page when available. Distinguish metadata/abstract evidence from full-text "
+                        "evidence. Keep retrieval logs, evidence matrices, source tables, citation audits, platform status and internal "
+                        "quality checks outside the manuscript body unless the user explicitly requests a systematic-review table or "
+                        "supplement. Provider failures are retrieval limitations, never domain facts. Follow REVIEW_SECTION_PLAN.md as "
+                        "a hard budget and evidence-allocation contract; do not repeat an observation merely to fill sections. "
+                        "The admitted record fields are exhaustive: do not infer or supply event counts, site counts, climate labels, "
+                        "study dates, residence times, QA/QC procedures, maintenance histories, article titles, authors, venues, DOIs, "
+                        "or URLs unless those exact fields are present in the admitted records. If a field is absent, write a natural "
+                        "boundary statement such as 'not supplied in the admitted package' and do not put an author-input placeholder "
+                        "in the reader-facing manuscript."
                     ),
                     artifact_path="bib/LITERATURE_REVIEW.md",
                     artifact_kind="report",
                     required_sections=[
-                        "Executive Summary",
-                        "Paper Evidence Table",
-                        "Research Landscape",
-                        "Foundational and Recent Work",
-                        "Methods and Datasets",
-                        "Baselines and Metrics",
-                        "Key Findings",
-                        "Contradictions and Limitations",
+                        "Abstract",
+                        "Keywords",
+                        "Introduction",
+                        "Review Scope and Approach",
+                        "Thematic Synthesis",
+                        "Contradictions and Boundary Conditions",
+                        "Discussion",
+                        "Conclusion",
                         "References",
                     ],
                     skill_paths=_skills(
@@ -945,6 +1036,14 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "experiment-audit",
                     ),
                 ),
+                StageDefinition(
+                    name="final_quality_gate",
+                    title="Publication Quality Gate",
+                    instruction="This stage is generated deterministically by the platform.",
+                    artifact_path="paper/FINAL_GATE_REPORT.json",
+                    artifact_kind="review",
+                    required_sections=["Decision", "Checks"],
+                ),
             ],
         ),
         "/present": WorkflowDefinition(
@@ -958,6 +1057,8 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Read only the frozen presentation SourceSet supplied in the context. Detect whether this is a stage report "
                         "or a paper talk, extract the problem, method, progress, evidence, limitations, and next steps, "
+                        "Treat the user's Objective as the actual research topic. Stage-report/paper-talk labels describe only the "
+                        "delivery format; never make the presentation itself, slide-making process, or report template the subject. "
                         "then prepare a slide-by-slide story and page-level rendering plan. Every slide must specify Page Type, "
                         "Render Mode, Layout Hint, one claim, and source files. Use image2_full for cover, section, explanation, "
                         "synthesis, and conclusion pages; Image-2 will create the complete page and nothing may be overlaid later. "
@@ -1083,7 +1184,10 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Reuse Cues",
                     ],
                     skill_paths=_skills(
-                        "platform-research-wiki",
+                        "research-wiki",
+                        "wiki-enrich",
+                        "research-review",
+                        "result-to-claim",
                     ),
                 ),
                 StageDefinition(
@@ -1098,7 +1202,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Future Retrieval Prompts",
                     ],
                     skill_paths=_skills(
-                        "platform-research-wiki",
+                        "research-wiki",
+                        "wiki-enrich",
+                        "research-pipeline",
                     ),
                 ),
             ],

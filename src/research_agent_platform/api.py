@@ -153,6 +153,7 @@ CHAT_PAGE = """<!doctype html>
     const uploadList = document.getElementById("upload-list");
     let currentTaskId = "";
     let currentCheckpoint = null;
+    let cloudPollTimer = null;
     let uploadInProgress = false;
     let pollTimer = null;
     let taskEventSource = null;
@@ -213,7 +214,7 @@ CHAT_PAGE = """<!doctype html>
         a.target = "_blank";
         a.textContent = `${artifact.relative_path} - ${artifact.description}`;
         card.appendChild(a);
-        if (artifact.kind === "image" || /\\.(png|jpg|jpeg|webp|gif)$/i.test(artifact.relative_path || "")) {
+        if (artifact.kind === "image" || /\\.(png|jpg|jpeg|webp|gif|svg)$/i.test(artifact.relative_path || "")) {
           const img = document.createElement("img");
           img.src = artifact.url_path;
           img.alt = artifact.relative_path;
@@ -271,9 +272,17 @@ CHAT_PAGE = """<!doctype html>
       const block = systemMessage("cloud-workspace", "云端工作区");
       const status = document.createElement("div");
       status.textContent = cloud.status === "error"
-          ? `同步失败：${cloud.error || "未知错误"}`
-          : `已同步 ${cloud.synced_files || 0} 个文件到 ${cloud.remote_path || "云盘"}`;
+          ? `同步失败：${cloud.error || "请稍后重试"}`
+          : cloud.status === "pending"
+            ? "清华网盘工作区链接正在生成中，完成后会自动显示。"
+            : `已同步 ${cloud.synced_files || 0} 个文件到 ${cloud.remote_path || "云盘"}`;
       block.appendChild(status);
+      if (cloud.status !== "error" && cloud.status !== "pending" && cloud.error) {
+        const warning = document.createElement("div");
+        warning.className = "muted warning";
+        warning.textContent = cloud.error;
+        block.appendChild(warning);
+      }
       const linksWrap = document.createElement("div");
       linksWrap.className = "cloud-links";
       const links = [
@@ -290,7 +299,28 @@ CHAT_PAGE = """<!doctype html>
         linksWrap.appendChild(link);
       }
       if (linksWrap.childElementCount) block.appendChild(linksWrap);
+      const directUrl = cloud.preview_url || cloud.download_url || cloud.share_url;
+      if (directUrl) {
+        const direct = document.createElement("div");
+        direct.className = "cloud-direct-url";
+        direct.textContent = `网盘链接：${directUrl}`;
+        block.appendChild(direct);
+      }
+      if (cloud.status === "pending") scheduleCloudWorkspacePoll();
       chat.scrollTop = chat.scrollHeight;
+    }
+
+    function scheduleCloudWorkspacePoll() {
+      if (cloudPollTimer || !sessionInput.value.trim()) return;
+      cloudPollTimer = window.setTimeout(async () => {
+        cloudPollTimer = null;
+        try {
+          const response = await fetch(`/api/sessions/${encodeURIComponent(sessionInput.value.trim())}`);
+          if (!response.ok) return;
+          const data = await response.json();
+          renderCloudWorkspace(data.cloud_workspace || {});
+        } catch (_) { /* a later user action can retry */ }
+      }, 2500);
     }
 
     async function syncCloudWorkspace() {
@@ -371,7 +401,10 @@ CHAT_PAGE = """<!doctype html>
         uploadStatus.textContent = "";
         statusEl.textContent = "就绪";
         renderCloudWorkspace(data.cloud_workspace || {});
-        renderMessage("assistant", `新会话已创建：${data.session_id}`);
+        const cloudUrl = (data.cloud_workspace || {}).preview_url || (data.cloud_workspace || {}).download_url || (data.cloud_workspace || {}).share_url || "";
+        renderMessage("assistant", cloudUrl
+          ? `新会话已创建：${data.session_id}\n清华网盘工作区链接：${cloudUrl}`
+          : `新会话已创建：${data.session_id}`);
         prompt.focus();
       } catch (error) {
         renderMessage("assistant", String(error.message || error));
@@ -695,14 +728,68 @@ FIRST_TURN_INTRO = (
     "-研究记忆/资料整理:/wiki\n"
     "你的问题已经接收到，请等待回复。"
 )
-BACKGROUND_ACK = "已经接收到您的请求，后台正在工作，请稍后..."
+from .workspace_access import touch_workspace_access
+BACKGROUND_ACK = "已收到指令，正在执行... （这可能需要几分钟的时间，完成后会直接给你访问工作空间的链接）"
+TEXT_FIRST_TURN_INTRO = (
+    "你好，我是科研智能体 Research Agent，专注于文献梳理、选题发现、实验规划、"
+    "论文写作、审稿回复和科研资料整理。你可以直接用文字描述需求，也可以使用 /review、"
+    "/idea、/plan、/code、/write、/rebuttal、/fig、/present 或 /wiki。"
+)
+
+
+def _cloud_workspace_url(session: Any) -> str:
+    """Return only a public Seafile URL for text-only API clients."""
+    cloud = getattr(session, "cloud_workspace", None)
+    if cloud is None:
+        return ""
+    return str(
+        getattr(cloud, "preview_url", "")
+        or getattr(cloud, "download_url", "")
+        or getattr(cloud, "share_url", "")
+        or ""
+    )
+
+
+def _is_cloud_link_lookup(message: str) -> bool:
+    """Keep a focused link lookup from being prefixed with the welcome card."""
+    normalized = "".join(str(message).lower().split())
+    return agent._is_cloud_workspace_link_question(normalized)
+
+
+def _consume_first_turn_intro(session: Any, message: str) -> bool:
+    if session is None:
+        return False
+    first_turn = agent.store.consume_first_turn_intro(session.user_id)
+    return bool(first_turn and not _is_cloud_link_lookup(message))
+
+
+def _first_turn_text(session: Any) -> str:
+    """Build the one-time pure-text welcome/workspace handoff."""
+    lines = [TEXT_FIRST_TURN_INTRO]
+    cloud_url = _cloud_workspace_url(session)
+    if cloud_url:
+        lines.extend(["", "工作区已创建", f"清华网盘工作区链接：{cloud_url}"])
+    elif config.cloud_sync_enabled:
+        lines.extend(["", "工作区已创建", "清华网盘工作区链接正在生成中，生成后会自动显示在当前会话。"])
+    return "\n".join(lines)
+
+
+def _first_turn_router_text(session: Any) -> str:
+    """Build the browser/SSE welcome while retaining the legacy router intro."""
+    lines = [FIRST_TURN_INTRO]
+    cloud_url = _cloud_workspace_url(session)
+    if cloud_url:
+        lines.extend(["", "工作区已创建", f"清华网盘工作区链接：{cloud_url}"])
+    elif config.cloud_sync_enabled:
+        lines.extend(["", "工作区已创建", "清华网盘工作区链接正在生成中，生成后会自动显示在当前会话。"])
+    return "\n".join(lines)
 
 
 def reserve_first_turn_intro(session_id: str | None, user_id: str) -> tuple[str, str]:
     session = agent.store.get_or_create_session(session_id, user_id)
     intro = ""
     if agent.store.consume_first_turn_intro(session.user_id):
-        intro = FIRST_TURN_INTRO
+        intro = _first_turn_text(session)
     return session.session_id, intro
 
 
@@ -875,6 +962,7 @@ async def api_create_session(payload: dict[str, Any] | None = None) -> dict[str,
         session_id=session.session_id,
     )
     session.workspace_root = str(workspace_root.resolve())
+    touch_workspace_access(workspace_root)
     agent.store.save_session(session)
     cloud_workspace = await agent.sync_session_workspace(session)
     return {
@@ -889,30 +977,24 @@ async def api_create_session(payload: dict[str, Any] | None = None) -> dict[str,
 async def api_agent_chat(payload: dict[str, Any]) -> dict[str, Any]:
     user_id = str(payload.get("user_id") or "local")
     message = str(payload.get("message", ""))
-    session = await agent._prepare_chat_session(
+    # The LangGraph intent gate is the single source of truth for whether the
+    # turn is plain text or a workflow.  Do not duplicate keyword routing in
+    # the HTTP adapter, otherwise an ordinary question can become a background
+    # file task before the graph sees it.
+    result = await agent.start_chat(
         payload.get("session_id"),
         message,
         user_id,
         sync_workspace=False,
     )
-    intro = ""
-    if agent.store.consume_first_turn_intro(session.user_id):
-        intro = FIRST_TURN_INTRO
-    task = await agent._create_chat_task(session, message, sync_workspace=False)
-    schedule_task(task.task_id, "start")
-    return {
-        "session_id": session.session_id,
-        "task_id": task.task_id,
-        "status": "running",
-        "command": task.command,
-        "workflow_title": task.workflow_title,
-        "artifact_root": task.artifact_root,
-        "artifacts": [],
-        "progress": task.progress_log[-10:],
-        "checkpoint": None,
-        "cloud_workspace": session.cloud_workspace.model_dump(),
-        "text": (f"{intro}\n\n" if intro else "") + BACKGROUND_ACK,
-    }
+    session = agent.store.load_session(result["session_id"])
+    if _consume_first_turn_intro(session, message):
+        intro = _first_turn_router_text(session)
+        if intro:
+            result["text"] = f"{intro}\n\n{result['text']}"
+    if result.get("task_id"):
+        schedule_task(result["task_id"], "start")
+    return result
 
 @app.post("/api/session/files")
 async def api_upload_session_files(
@@ -947,6 +1029,7 @@ async def api_upload_session_files(
         session_id=session.session_id,
     )
     session.workspace_root = str(workspace_root.resolve())
+    touch_workspace_access(workspace_root)
     agent.store.save_session(session)
     artifacts: list[dict[str, Any]] = []
     for upload in files:
@@ -997,6 +1080,7 @@ async def api_sync_session_workspace(session_id: str) -> dict[str, Any]:
     session = agent.store.load_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
+    touch_workspace_access(session.workspace_root)
     cloud_workspace = await agent.sync_session_workspace(session)
     return {
         "session_id": session.session_id,
@@ -1125,7 +1209,8 @@ def chat_completion_payload(
         "x_agent_task": {
             "task_id": agent_result["task_id"],
             "status": agent_result["status"],
-            "artifact_root": agent_result["artifact_root"],
+            # Do not expose the server filesystem to text-only clients.
+            "artifact_root": "",
             "session_id": agent_result["session_id"],
             "progress": agent_result.get("progress", []),
         },
@@ -1168,6 +1253,29 @@ async def list_models(authorization: str | None = Header(default=None)) -> dict[
     return await upstream_list_models()
 
 
+@app.get("/v1")
+async def openai_compatible_discovery() -> dict[str, Any]:
+    """Describe the public OpenAI-compatible base path for gateway probes."""
+    return {
+        "object": "api",
+        "base_path": "/v1",
+        "endpoints": ["/v1/models", "/v1/chat/completions", "/v1/responses"],
+        "authentication": "Bearer token in the Authorization header",
+    }
+
+
+@app.get("/api/sessions/{session_id}")
+def api_get_session_workspace(session_id: str) -> dict[str, Any]:
+    session = agent.store.load_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
+    return {
+        "session_id": session.session_id,
+        "workspace_root": session.workspace_root,
+        "cloud_workspace": session.cloud_workspace.model_dump(),
+    }
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     payload: dict[str, Any],
@@ -1195,12 +1303,19 @@ async def chat_completions(
         latest_user = "Please summarize the current task state."
 
     if payload.get("stream"):
-        session = await agent._prepare_chat_session(session_id, latest_user, user_id, sync_workspace=False)
+        # Use the same LangGraph intent gate as the non-streaming endpoints;
+        # the transport must not make its own keyword-based task decision.
+        result = await agent.start_chat(session_id, latest_user, user_id, sync_workspace=False)
+        session = agent.store.load_session(result["session_id"])
         intro = ""
-        if agent.store.consume_first_turn_intro(session.user_id):
-            intro = FIRST_TURN_INTRO
-        task = await agent._create_chat_task(session, latest_user, sync_workspace=False)
-        schedule_task(task.task_id, "start")
+        result_text = result["text"]
+        if _consume_first_turn_intro(session, latest_user):
+            intro = _first_turn_text(session)
+        if intro:
+            result["text"] = f"{intro}\n\n{result['text']}"
+        task = agent.get_task(result["task_id"]) if result.get("task_id") else None
+        if task is not None:
+            schedule_task(task.task_id, "start")
 
         async def event_stream():
             if intro:
@@ -1221,12 +1336,12 @@ async def chat_completions(
                 chat_completion_stream_payload(
                     payload,
                     {
-                        "text": BACKGROUND_ACK,
-                        "task_id": task.task_id,
-                        "status": "running",
-                        "artifact_root": task.artifact_root,
-                        "session_id": session.session_id,
-                        "progress": task.progress_log[-10:],
+                        "text": result_text,
+                        "task_id": result.get("task_id", ""),
+                        "status": result.get("status", "idle"),
+                        "artifact_root": result.get("artifact_root", ""),
+                        "session_id": result["session_id"],
+                        "progress": result.get("progress", []),
                     },
                 )
             )
@@ -1241,7 +1356,20 @@ async def chat_completions(
                 "X-Accel-Buffering": "no",
             },
         )
-    agent_result = await agent.chat(session_id, latest_user, user_id)
+    # OpenAI-compatible chat must not wait on best-effort Seafile delivery.
+    # Workspace access is touched synchronously and the existing background
+    # scheduler can finish delivery; keeping this request local prevents a
+    # congested cloud endpoint from turning ordinary multi-turn chat into
+    # 90-second timeouts/429s.
+    agent_result = await agent.chat(session_id, latest_user, user_id, sync_workspace=False)
+    session = agent.store.load_session(agent_result["session_id"])
+    if _consume_first_turn_intro(session, latest_user):
+        intro = _first_turn_text(session)
+        if intro:
+            if agent_result.get("status") == "idle" and not agent_result.get("task_id"):
+                agent_result["text"] = intro
+            else:
+                agent_result["text"] = f"{intro}\n\n{agent_result['text']}"
     return chat_completion_payload(payload, agent_result)
 
 
@@ -1259,7 +1387,12 @@ async def responses(
         user_id = str(metadata.get("user_id") or metadata.get("user") or user_id)
     if user_id == "local" and payload.get("user"):
         user_id = str(payload.get("user"))
-    result = await agent.chat(session_id, str(payload.get("input", "")), user_id)
+    result = await agent.chat(session_id, str(payload.get("input", "")), user_id, sync_workspace=False)
+    session = agent.store.load_session(result["session_id"])
+    if _consume_first_turn_intro(session, str(payload.get("input", ""))):
+        intro = _first_turn_text(session)
+        if intro:
+            result["text"] = f"{intro}\n\n{result['text']}"
     text = result["text"]
     response_id = result["task_id"] or result["session_id"]
     return {
@@ -1277,12 +1410,11 @@ async def responses(
         "metadata": {
             "task_id": result["task_id"],
             "status": result["status"],
-            "artifact_root": result["artifact_root"],
+            "artifact_root": "",
             "session_id": result["session_id"],
             "progress": result.get("progress", []),
         },
     }
-
 
 
 

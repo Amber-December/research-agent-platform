@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from time import perf_counter
 from pathlib import Path
 from typing import Any, TypedDict, TYPE_CHECKING
 
@@ -8,6 +10,7 @@ from langgraph.types import Command, interrupt
 
 from ..config import config
 from ..models import ApprovalCheckpoint, TaskRun
+from ..router.intent import route_message
 from .checkpointer import PersistentMemorySaver
 from .workflows import StageDefinition, WorkflowDefinition
 
@@ -19,6 +22,19 @@ class WorkflowGraphState(TypedDict, total=False):
     task_id: str
     revision_feedback: str
     approval_decision: str
+
+
+class IntentGraphState(TypedDict, total=False):
+    """Input/output state for the pre-workflow intent gate.
+
+    ``route`` is either a ``RouteDecision`` or ``None`` (plain text chat).
+    Keeping this gate as a tiny graph makes the decision explicit and keeps
+    workflow graphs focused on artifact execution and human checkpoints.
+    """
+
+    message: str
+    context: str
+    route: Any
 
 
 class LangGraphWorkflowRuntime:
@@ -36,6 +52,27 @@ class LangGraphWorkflowRuntime:
             command: self._compile_workflow_graph(workflow)
             for command, workflow in workflows.items()
         }
+        self.intent_graph = self._compile_intent_graph()
+
+    async def classify_intent(self, message: str, context: str = "") -> Any:
+        """Run the LLM-backed intent gate before choosing chat or a workflow."""
+        state = await self.intent_graph.ainvoke({"message": message, "context": context})
+        return state.get("route")
+
+    def _compile_intent_graph(self):
+        builder = StateGraph(IntentGraphState)
+
+        async def classify_node(state: IntentGraphState) -> IntentGraphState:
+            route = await route_message(
+                str(state.get("message", "")),
+                str(state.get("context", "")),
+            )
+            return {"route": route}
+
+        builder.add_node("intent_classification", classify_node)
+        builder.add_edge(START, "intent_classification")
+        builder.add_edge("intent_classification", END)
+        return builder.compile(name="intent-classification")
 
     async def start_task(self, task: TaskRun, workflow: WorkflowDefinition) -> dict:
         await self.graphs[workflow.command].ainvoke(
@@ -138,9 +175,35 @@ class LangGraphWorkflowRuntime:
             self.service._log_progress(task, f"阶段开始: {stage.title}")
             self.service.store.save_task(task)
 
-            artifact = await self.service._execute_stage(task, workflow, stage, feedback)
+            started_at = perf_counter()
+            try:
+                async with asyncio.timeout(config.workflow_stage_timeout_seconds):
+                    artifact = await self.service._execute_stage(task, workflow, stage, feedback)
+            except TimeoutError as exc:
+                elapsed_seconds = perf_counter() - started_at
+                detail = (
+                    f"阶段超时: {stage.title} 在 {elapsed_seconds:.1f}s 内未完成 "
+                    f"(限制 {config.workflow_stage_timeout_seconds:.0f}s)。"
+                )
+                self.service._log_progress(task, detail, kind="error")
+                self.service.store.save_task(task)
+                raise RuntimeError(detail) from exc
+            except BaseException as exc:
+                elapsed_seconds = perf_counter() - started_at
+                if not isinstance(exc, asyncio.CancelledError):
+                    self.service._log_progress(
+                        task,
+                        f"阶段失败: {stage.title} | 耗时 {elapsed_seconds:.1f}s | {exc}",
+                        kind="error",
+                    )
+                    self.service.store.save_task(task)
+                raise
             task.artifacts.append(artifact)
-            self.service._log_progress(task, f"阶段完成: {stage.title} -> {artifact.relative_path}")
+            elapsed_seconds = perf_counter() - started_at
+            self.service._log_progress(
+                task,
+                f"阶段完成: {stage.title} -> {artifact.relative_path} | 耗时 {elapsed_seconds:.1f}s",
+            )
             if is_rerun:
                 self.service._log_progress(task, f"阶段已重生成: {stage.title}")
             self.service.store.save_task(task)
@@ -239,14 +302,14 @@ class LangGraphWorkflowRuntime:
             task = self._load_task(state)
             if task.command == "/idea":
                 await self.service._write_research_contract(task)
-            if task.command == "/fig":
-                task.artifacts.extend(await self.service._write_figure_delivery_artifacts(task))
             if task.command == "/write":
                 task.artifacts.extend(await self.service._write_delivery_artifacts(task))
             if task.command == "/rebuttal":
                 task.artifacts.extend(self.service._write_rebuttal_delivery_artifacts(task))
             if task.command == "/review":
                 task.artifacts.extend(self.service._write_review_delivery_artifacts(task))
+                if task.workflow_mode == "literature_review_writing":
+                    task.artifacts.extend(self.service._write_review_writing_artifacts(task))
             if task.command == "/present":
                 await self.service._write_presentation_delivery_artifacts(task)
 

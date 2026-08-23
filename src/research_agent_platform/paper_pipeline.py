@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 from .models import UploadBatchRecord, WriteSourceConfig
+from .publication_contracts import VenueRuleSource, VenueStyleCard, VenueStyleRule
 
 
 TEXT_EXTENSIONS = {
@@ -52,59 +55,370 @@ IGNORED_CONTEXT_FILES = {
     "PRESENTATION_SOURCE_SELECTION.json",
     "PRESENTATION_SOURCE_INDEX.md",
 }
-WORKSPACE_ORDER = ("paper", "figures", "plan", "idea", "bib", "Content", "logs", "code", "wiki")
-
-
-_INLINE_MATERIAL_MARKERS = (
-    "以下材料",
-    "研究材料",
-    "研究计划",
-    "研究方案",
-    "研究结果",
-    "实验结果",
-    "原文",
-    "稿件",
-    "草稿",
-    "数据如下",
-    "based on the following",
-    "research material",
-    "research plan",
-    "research results",
-    "manuscript text",
-    "draft text",
+WORKSPACE_ORDER = (
+    "paper",
+    "figures",
+    "results",
+    "plan",
+    "idea",
+    "bib",
+    "Content",
+    "logs",
+    "code",
+    "wiki",
 )
 
+DISCIPLINE_CUES = {
+    "ai_computer_science": ("artificial intelligence", "machine learning", "ai ", "benchmark", "llm", "模型", "算法", "计算机"),
+    "medicine_clinical": ("clinical", "patient", "cohort", "randomized", "临床", "患者", "队列", "医学"),
+    "environmental_science_engineering": ("environment", "hydrology", "watershed", "污染", "洪涝", "环境", "水文"),
+    "chemistry_materials": ("material", "catalyst", "polymer", "化学", "材料", "催化", "表征"),
+    "social_science": ("social science", "survey respondent", "causal inference", "社会科学", "问卷", "因果推断"),
+    "law_legal": ("jurisdiction", "holding", "statute", "法律", "判例", "法学"),
+    "arts_humanities": ("humanities", "archive", "translation", "人文", "文本细读", "译本"),
+    "mathematics_theory": ("theorem", "lemma", "proof", "数学", "定理", "引理", "证明"),
+    "life_science_biology": ("biology", "cell", "gene", "organism", "生物", "细胞", "基因"),
+}
 
-def extract_inline_write_material(objective: str) -> str:
-    """Return factual material pasted into a /write request, if it is explicit.
 
-    A writing request is not automatically evidence.  We only materialize text when
-    the user explicitly frames it as supplied material and provides a substantive
-    payload after a colon or on subsequent lines.  This lets short topic-only
-    requests continue through the literature-retrieval route while making pasted
-    plans, results, and manuscript passages first-class session evidence.
-    """
-    normalized = objective.strip()
-    if not normalized:
+def select_discipline_profile(objective: str) -> dict:
+    styles_path = Path(__file__).resolve().parents[2] / "resources" / "publication" / "styles" / "discipline-styles-v1.json"
+    profiles = json.loads(styles_path.read_text(encoding="utf-8"))["profiles"]
+    lowered = objective.lower()
+    profile_id = next(
+        (
+            candidate
+            for candidate, cues in DISCIPLINE_CUES.items()
+            if any(cue in lowered for cue in cues)
+        ),
+        "general",
+    )
+    if profile_id == "general":
+        return {
+            "id": profile_id,
+            "organization": "problem-evidence-analysis-boundary",
+            "claim_calibration": "Match every substantive claim to supplied evidence and state material limits.",
+            "paragraph_function": "Give each paragraph one analytical job and a visible transition.",
+            "citation_placement": "Place citations beside the claim they support.",
+            "reporting_conventions": ["source traceability", "conditions", "uncertainty", "limitations"],
+        }
+    return {"id": profile_id, **profiles[profile_id]}
+
+
+def _document_profile_id(objective: str) -> str | None:
+    if re.search(r"\b(?:phd|doctoral|master(?:'?s)?|dissertation|thesis)\b|博士|硕士|学位论文", objective, re.I):
+        return "degree_thesis"
+    return None
+
+
+def _writing_genre(objective: str) -> str:
+    if re.search(r"\b(?:systematic review|meta-analysis)\b|系统综述|元分析", objective, re.I):
+        return "systematic_review"
+    if re.search(r"\b(?:literature review|review article|systematic review|survey)\b|文献综述|综述文章", objective, re.I):
+        return "literature_review"
+    if re.search(r"\b(?:short communication|research letter|brief report)\b|短通讯|研究简报", objective, re.I):
+        return "short_communication"
+    if re.search(r"\b(?:perspective|commentary)\b|观点|评论", objective, re.I):
+        return "perspective_commentary"
+    if re.search(r"\b(?:method|protocol|resource)\b|方法学|协议|资源论文", objective, re.I):
+        return "methods_protocol_resource"
+    return "research_article"
+
+
+def _writing_language_key(objective: str) -> str:
+    if re.search(r"英文|英语|\benglish\b", objective, re.I):
+        return "en"
+    if re.search(r"中文|汉语|\bchinese\b", objective, re.I):
+        return "zh"
+    chinese_count = len(re.findall(r"[\u3400-\u9fff]", objective))
+    latin_count = len(re.findall(r"[A-Za-z]", objective))
+    return "zh" if chinese_count > latin_count else "en"
+
+
+def _curated_exemplar_context(objective: str, discipline_id: str, language_key: str) -> list[str]:
+    patterns_path = Path(__file__).resolve().parents[2] / "resources" / "publication" / "exemplars" / "curated-patterns-v1.json"
+    try:
+        patterns = json.loads(patterns_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+    document_profile_id = _document_profile_id(objective)
+    if document_profile_id:
+        document_profile = patterns.get("document_profiles", {}).get(document_profile_id, {})
+        rules = document_profile.get(language_key, [])
+        if rules:
+            return [
+                f"Document profile: {document_profile_id}",
+                "Curated exemplar patterns (derived guidance, not copied prose): " + " ".join(rules),
+                "Never copy exemplar wording; source-specific submission rules still require current official guidance.",
+            ]
+
+    profile = patterns.get("profiles", {}).get(discipline_id, {})
+    rules = profile.get(_writing_genre(objective), [])
+    if not rules:
+        return []
+    return [
+        "Curated exemplar patterns (derived guidance, not copied prose): " + " ".join(rules),
+        "Never copy exemplar wording; source-specific submission rules still require current official guidance.",
+    ]
+
+
+def _style_corpus_context(objective: str, discipline_id: str, language_key: str) -> list[str]:
+    corpus_root = Path(__file__).resolve().parents[2] / "resources" / "publication" / "style-corpus"
+    matrices = []
+    for filename in ("learning-matrix-v1.json",):
+        try:
+            matrices.append(json.loads((corpus_root / filename).read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    genre = _writing_genre(objective)
+    matches = []
+    for matrix in matrices:
+        for item in matrix.get("rules", []):
+            applies_to = set(item.get("applies_to", []))
+            if not isinstance(item, dict) or not applies_to:
+                continue
+            if "all" in applies_to or genre in applies_to or discipline_id in applies_to or language_key in applies_to:
+                matches.append(item)
+    if not matches:
+        return []
+    rules = " ".join(str(item.get("rule", "")) for item in matches if item.get("rule"))
+    boundaries = " ".join(str(item.get("boundary", "")) for item in matches if item.get("boundary"))
+    source_ids = sorted({source for item in matches for source in item.get("source_ids", [])})
+    return [
+        "Verified style-corpus rules (derived from lawfully accessible full texts; not copied prose): " + rules,
+        "Style-corpus boundaries: " + boundaries,
+        "Style-corpus source IDs: " + ", ".join(source_ids),
+    ]
+
+
+def build_writing_style_context(objective: str, venue_card: VenueStyleCard | None = None) -> str:
+    profile = select_discipline_profile(objective)
+    language_key = _writing_language_key(objective)
+    language = "Chinese" if language_key == "zh" else "English"
+    rules = [
+        f"Discipline profile: {profile['id']}",
+        f"Organization: {profile['organization']}",
+        f"Claim calibration: {profile['claim_calibration']}",
+        f"Paragraph role: {profile['paragraph_function']}",
+        f"Citation placement: {profile['citation_placement']}",
+        "Reporting conventions: " + ", ".join(profile["reporting_conventions"]),
+        f"Draft language: {language}. {profile.get('language_guidance', {}).get(language_key, '')}",
+        "Use specific subjects and measured conditions instead of generic importance, novelty, smooth-transition, or capability language.",
+        "Avoid these failure modes: " + "; ".join(profile.get("failure_modes", [])),
+        "Preserve the user's terminology, evidence boundary, and section-specific purpose.",
+    ]
+    rules.extend(_curated_exemplar_context(objective, profile["id"], language_key))
+    rules.extend(_style_corpus_context(objective, profile["id"], language_key))
+    if venue_card:
+        rules.append(f"Verified venue card: {venue_card.venue} ({venue_card.language})")
+        rules.extend(
+            f"Verified venue rule [{rule.category}]: {rule.instruction}"
+            for rule in venue_card.rules
+            if rule.status == "verified"
+        )
+        rules.extend(
+            f"Author confirmation needed [{rule.category}]: {rule.instruction}"
+            for rule in venue_card.rules
+            if rule.status == "needs_author_confirmation"
+        )
+    return "\n".join(rules)
+
+
+def load_workspace_venue_style_card(workspace_root: Path) -> VenueStyleCard | None:
+    card_path = workspace_root / "Content" / "VENUE_STYLE_CARD.json"
+    if not card_path.exists():
+        return None
+    try:
+        return VenueStyleCard.model_validate_json(card_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def build_fulltext_venue_style_card(
+    workspace_root: Path,
+    *,
+    venue: str,
+    article_type: str,
+    language: str,
+    allowed_relative_paths: Iterable[str] | None = None,
+    minimum_fulltexts: int = 3,
+) -> VenueStyleCard | None:
+    """Derive bounded, non-copying style rules from lawful same-session full texts."""
+    allowed = set(allowed_relative_paths or ())
+    paper_paths = sorted((workspace_root / "bib" / "papers").glob("*.pdf"))
+    if allowed:
+        paper_paths = [
+            path for path in paper_paths
+            if path.relative_to(workspace_root).as_posix() in allowed
+        ]
+    samples: list[tuple[Path, str]] = []
+    for path in paper_paths:
+        text = "\n".join(block for _, block, _ in _extract_source_blocks(path)).strip()
+        if len(text) >= 2500:
+            samples.append((path, text))
+    if len(samples) < minimum_fulltexts:
+        return None
+
+    heading_counts: dict[str, int] = {}
+    abstract_count = 0
+    reference_count = 0
+    for _, text in samples:
+        lowered = text.lower()
+        abstract_count += int("abstract" in lowered or "摘要" in text)
+        reference_count += int("references" in lowered or "参考文献" in text)
+        for heading in re.findall(r"(?m)^\s*(?:\d+(?:\.\d+)*\s+)?([A-Z][A-Za-z &/-]{2,70}|[\u4e00-\u9fff]{2,24})\s*$", text):
+            normalized = re.sub(r"\s+", " ", heading).strip()
+            heading_counts[normalized] = heading_counts.get(normalized, 0) + 1
+    common_headings = [heading for heading, count in heading_counts.items() if count >= max(2, len(samples) // 2)]
+    common_headings = common_headings[:12]
+    source_urls = [f"workspace://{path.relative_to(workspace_root).as_posix()}" for path, _ in samples]
+    rules = [
+        VenueStyleRule(
+            category="fulltext-structure",
+            instruction=(
+                "Use a reader-facing article structure consistent with the sampled full texts; adapt section names to the "
+                "user's evidence and article type rather than copying any source wording."
+                + (" Common observed headings: " + "; ".join(common_headings) + "." if common_headings else "")
+            ),
+            source_urls=source_urls,
+        ),
+        VenueStyleRule(
+            category="fulltext-rhetoric",
+            instruction=(
+                f"Across {len(samples)} lawful full texts, keep abstracts and references as distinct article components "
+                f"when appropriate (observed in {abstract_count}/{len(samples)} and {reference_count}/{len(samples)} samples). "
+                "Learn organization and evidential moves only; never reuse source sentences."
+            ),
+            source_urls=source_urls,
+        ),
+    ]
+    return VenueStyleCard(
+        card_id=f"fulltext-{re.sub(r'[^a-z0-9]+', '-', venue.lower()).strip('-') or 'venue'}-{article_type}",
+        venue=venue,
+        language="zh" if language == "zh" else "en",
+        sources=[VenueRuleSource(url=url, source_type="open_exemplar") for url in source_urls],
+        rules=rules,
+    )
+
+
+def extract_venue_guidance_urls(objective: str) -> list[str]:
+    urls: list[str] = []
+    for candidate in re.findall(r"https://[^\s<>\]\[\)\}\"']+", objective):
+        parsed = urlparse(candidate.rstrip(".,;；，。"))
+        hostname = parsed.hostname or ""
+        if parsed.scheme != "https" or not hostname or hostname.lower() == "localhost":
+            continue
+        try:
+            if ipaddress.ip_address(hostname).is_private:
+                continue
+        except ValueError:
+            pass
+        if candidate not in urls:
+            urls.append(candidate)
+    return urls
+
+
+def extract_writing_length_contract(objective: str) -> dict[str, int | str] | None:
+    english_range = re.search(
+        r"\b(\d{2,6})\s*(?:-|–|to)\s*(\d{2,6})\s*words?\b",
+        objective,
+        re.I,
+    )
+    if english_range:
+        return {
+            "minimum": int(english_range.group(1)),
+            "maximum": int(english_range.group(2)),
+            "unit": "words",
+        }
+    chinese_maximum = re.search(r"(?:不超过|至多|最多)\s*(\d{2,6})\s*字", objective)
+    if chinese_maximum:
+        return {"minimum": 0, "maximum": int(chinese_maximum.group(1)), "unit": "characters"}
+    return None
+
+
+def build_writing_length_guidance(objective: str) -> str:
+    profiles_path = (
+        Path(__file__).resolve().parents[2]
+        / "resources"
+        / "publication"
+        / "length-profiles"
+        / "article-section-lengths-v1.json"
+    )
+    try:
+        payload = json.loads(profiles_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return ""
-    lowered = normalized.lower()
-    if not any(marker in lowered for marker in _INLINE_MATERIAL_MARKERS):
-        return ""
 
-    payload = ""
-    colon_match = re.search(r"[：:]\s*(.+)$", normalized, re.S)
-    if colon_match:
-        payload = colon_match.group(1).strip()
+    if _document_profile_id(objective):
+        profile_id = "degree_thesis"
+    elif _writing_language_key(objective) == "zh" and _writing_genre(objective) == "literature_review":
+        profile_id = "chinese_literature_review"
+    elif _writing_language_key(objective) == "zh" and _writing_genre(objective) == "research_article":
+        profile_id = "chinese_journal_article"
     else:
-        lines = [line.strip() for line in normalized.splitlines() if line.strip()]
-        if len(lines) > 1:
-            payload = "\n".join(lines[1:]).strip()
+        profile_id = _writing_genre(objective)
+    profile = payload.get("profiles", {}).get(profile_id)
+    if not isinstance(profile, dict):
+        return ""
 
-    # Avoid treating a bare instruction such as "based on the research plan" as
-    # evidence.  A supplied payload must contain enough lexical content to be
-    # useful for a claim/evidence record.
-    payload = re.sub(r"^[-*]\s*", "", payload)
-    return payload if len(re.sub(r"\s+", "", payload)) >= 40 else ""
+    explicit = extract_writing_length_contract(objective)
+    lines = [f"{profile['label']} fallback: {profile['default_total']}." ]
+    if explicit:
+        lines.append(
+            "User-specified contract overrides profile defaults: "
+            f"{explicit['minimum']}–{explicit['maximum']} {explicit['unit']}."
+        )
+        minimum = int(explicit["minimum"])
+        maximum = int(explicit["maximum"])
+        lines.append(
+            f"Aim for approximately {(minimum + maximum) // 2} {explicit['unit']} before references, "
+            "while preserving a verification margin inside the permitted range."
+        )
+    lines.append(
+        "Section budget (references, tables, captions, and appendices are excluded unless the user or venue says otherwise):"
+    )
+    lines.extend(f"- {section['name']}: {section['budget']}" for section in profile.get("sections", []))
+    if explicit and minimum > 0:
+        target = (minimum + maximum) // 2
+        scaled_budgets = _scaled_section_budgets(profile.get("sections", []), target, str(explicit["unit"]))
+        if scaled_budgets:
+            lines.append("Scaled section budget for this delivery (before references):")
+            lines.extend(f"- {name}: {budget}" for name, budget in scaled_budgets)
+    lines.append(str(profile.get("architecture", "")))
+    lines.append(
+        "Explicit user limits and verified target-venue instructions override these fallbacks. "
+        "Treat percentages as planning bands, not quotas; do not add filler, and do not shorten by dropping evidence "
+        "conditions, citations, uncertainty, or required section responsibilities."
+    )
+    return "\n".join(line for line in lines if line)
+
+
+def _scaled_section_budgets(sections: list[dict], target: int, unit: str) -> list[tuple[str, str]]:
+    scaled: list[tuple[str, str]] = []
+    for section in sections:
+        name = str(section.get("name", "")).strip()
+        budget = str(section.get("budget", "")).strip()
+        percentage = re.fullmatch(r"(\d+)–(\d+)%", budget)
+        if not name or percentage is None:
+            continue
+        lower = round(target * int(percentage.group(1)) / 100)
+        upper = round(target * int(percentage.group(2)) / 100)
+        scaled.append((name, f"{lower}–{upper} {unit}"))
+    return scaled
+
+
+def assess_writing_length(text: str, contract: dict[str, int | str]) -> dict[str, int | str | bool]:
+    unit = str(contract["unit"])
+    if unit == "characters":
+        count = len(re.sub(r"\s", "", text))
+    else:
+        count = len(re.findall(r"\b[\w'-]+\b", text))
+    return {
+        "unit": unit,
+        "count": count,
+        "valid": int(contract["minimum"]) <= count <= int(contract["maximum"]),
+    }
 
 
 def resolve_write_source_config(
@@ -212,8 +526,6 @@ def collect_paper_evidence(
     source_refs: Iterable[str],
     *,
     total_limit: int = 40000,
-    query: str = "",
-    prioritize_research_sections: bool = False,
 ) -> list[dict]:
     records: list[dict] = []
     used = 0
@@ -223,8 +535,6 @@ def collect_paper_evidence(
             continue
         suffix = source.suffix.lower()
         extracted = _extract_source_blocks(source)
-        if suffix == ".pdf" and prioritize_research_sections:
-            extracted = _prioritize_research_blocks(extracted, query)
         if not extracted and suffix in IMAGE_EXTENSIONS:
             extracted = [(None, "", "visual")]
         for page, text, evidence_type in extracted:
@@ -247,43 +557,51 @@ def collect_paper_evidence(
     return records
 
 
-def _prioritize_research_blocks(
-    blocks: list[tuple[int | None, str, str]],
-    query: str,
-) -> list[tuple[int | None, str, str]]:
-    query_terms = {
-        term.casefold()
-        for term in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", query)
-    }
-    section_weights = {
-        "future work": 140,
-        "future direction": 120,
-        "limitation": 120,
-        "limitations": 120,
-        "discussion": 110,
-        "conclusion": 100,
-        "open problem": 90,
-        "remain an open": 80,
-        "challenge": 35,
-        "ablation": 30,
-        "experiment": 20,
-        "结果": 20,
-        "讨论": 110,
-        "局限": 120,
-        "未来工作": 140,
-        "结论": 100,
-        "开放问题": 90,
-    }
+SECTION_ALIASES: dict[str, tuple[str, ...]] = {
+    "摘要": ("摘要", "abstract"),
+    "关键词": ("关键词", "keywords"),
+    "引言": ("引言", "introduction"),
+    "文献综述": ("文献综述", "related work", "literature review"),
+    "方法": ("研究方法", "方法", "methods", "methodology", "materials and methods"),
+    "结果": ("研究结果", "结果", "experiments", "results"),
+    "讨论": ("讨论", "discussion"),
+    "结论": ("结论", "conclusion"),
+}
 
-    def score(item: tuple[int | None, str, str]) -> tuple[int, int]:
-        page, text, _ = item
-        normalized = text.casefold()
-        value = 45 if page == 1 else 0
-        value += sum(weight * normalized.count(term) for term, weight in section_weights.items())
-        value += sum(8 * normalized.count(term) for term in query_terms)
-        return value, -(page or 0)
 
-    return sorted(blocks, key=score, reverse=True)
+def infer_source_section(workspace_root: Path, source_refs: Iterable[str]) -> dict[str, str | float]:
+    """Infer a pasted/uploaded manuscript section without overriding an explicit request."""
+    scores = {section: 0 for section in SECTION_ALIASES}
+    evidence: dict[str, str] = {}
+    scanned = 0
+    for relative in source_refs:
+        source = workspace_root / relative
+        if not _is_source_file(source):
+            continue
+        for _, text, _ in _extract_source_blocks(source):
+            excerpt = text[:12000]
+            scanned += len(excerpt)
+            for section, aliases in SECTION_ALIASES.items():
+                for alias in aliases:
+                    if re.search(rf"(?im)^\s*(?:#+\s*)?{re.escape(alias)}\s*$", excerpt):
+                        scores[section] += 6
+                        evidence.setdefault(section, f"heading `{alias}`")
+                    elif re.search(rf"(?i)\b{re.escape(alias)}\b", excerpt):
+                        scores[section] += 1
+                        evidence.setdefault(section, f"section cue `{alias}`")
+            if scanned >= 24000:
+                break
+        if scanned >= 24000:
+            break
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    section, score = ranked[0]
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0
+    confidence = "high" if score >= 6 and score >= runner_up + 3 else "medium" if score >= 3 else "low"
+    return {
+        "section": section if score else "",
+        "confidence": confidence,
+        "reason": evidence.get(section, "no reliable section heading or cue found"),
+    }
 
 
 def paper_evidence_to_json(records: Iterable[dict]) -> str:
@@ -308,7 +626,24 @@ def paper_evidence_prompt(records: Iterable[dict], *, limit: int = 30000) -> str
 
 def select_venue_profile(objective: str) -> dict:
     lowered = objective.lower()
-    if any(term in lowered for term in ("综述", "survey", "review article", "narrative review")):
+    if any(
+        term in lowered
+        for term in (
+            "学位论文",
+            "博士论文",
+            "硕士论文",
+            "博士学位",
+            "硕士学位",
+            "thesis",
+            "dissertation",
+            "章节润色",
+            "章节修改",
+            "论文框架",
+        )
+    ):
+        name = "degree-thesis-section"
+        required = ["结构诊断", "可替换研究框架", "未解决作者输入"]
+    elif any(term in lowered for term in ("综述", "survey", "review article", "narrative review")):
         name = "review-article"
         required = ["Introduction", "Review Methodology", "Synthesis", "Limitations", "Conclusion", "References"]
     else:
@@ -337,17 +672,30 @@ def build_paper_quality_reports(
     manuscript_path = workspace_root / manuscript_relative
     manuscript = manuscript_path.read_text(encoding="utf-8", errors="ignore") if manuscript_path.exists() else ""
     bib_keys = _workspace_bib_keys(workspace_root)
-    cited_keys = _cited_keys(manuscript)
-    unknown_keys = sorted(set(cited_keys) - bib_keys)
+    manuscript_body = _markdown_body_before_references(manuscript)
+    cited_keys = _cited_keys(manuscript_body)
+    all_citation_keys = _cited_keys(manuscript)
+    unknown_keys = sorted(set(all_citation_keys) - bib_keys)
     uncited_keys = sorted(bib_keys - set(cited_keys))
+    body_citation_coverage = round(len(set(cited_keys) & bib_keys) / len(bib_keys), 3) if bib_keys else None
+    corpus_coverage_status = (
+        "not_applicable"
+        if not bib_keys
+        else "pass" if not uncited_keys else "needs_attention"
+    )
     citation_audit = {
         "manuscript": manuscript_relative,
         "cited_keys": cited_keys,
         "known_bibliography_keys": sorted(bib_keys),
         "unknown_keys": unknown_keys,
         "uncited_keys": uncited_keys,
-        "status": "pass" if not unknown_keys else "needs_attention",
-        "note": "Key resolution is deterministic; semantic citation support still requires author verification.",
+        "body_citation_coverage": body_citation_coverage,
+        "corpus_coverage_status": corpus_coverage_status,
+        "status": "pass" if not unknown_keys and corpus_coverage_status != "needs_attention" else "needs_attention",
+        "note": (
+            "Key resolution and body-use coverage are deterministic; semantic citation support still requires "
+            "author verification. A reference-list entry alone does not count as support for a manuscript claim."
+        ),
     }
 
     headings = _markdown_headings(manuscript)
@@ -532,6 +880,11 @@ def _cited_keys(text: str) -> list[str]:
     for citation_group in re.findall(r"\[([^\]]*@[\w:./-]+[^\]]*)\]", text):
         keys.extend(re.findall(r"@([\w:./-]+)", citation_group))
     return sorted(set(keys))
+
+
+def _markdown_body_before_references(text: str) -> str:
+    match = re.search(r"(?im)^#{1,6}\s+(?:references|bibliography|参考文献)\s*$", text)
+    return text[: match.start()] if match else text
 
 
 def _markdown_headings(text: str) -> list[str]:

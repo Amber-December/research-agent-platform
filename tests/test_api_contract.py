@@ -65,7 +65,33 @@ def test_openai_compatible_chat_completion_streams_done_marker(service, monkeypa
     assert response.status_code == 200
     assert "data: " in body
     assert "chat.completion.chunk" in body
-    assert "科研智能体(ResearchAgent)" in body
+    assert "你好，我是科研智能体 Research Agent" in body
+    assert "data: [DONE]" in body
+
+
+def test_openai_streaming_information_question_does_not_create_task(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+
+    async def answer_question(**_kwargs):
+        return "PPT 是演示文稿。"
+
+    monkeypatch.setattr(agent_module, "generate_text", answer_question)
+    client = TestClient(api_module.app)
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "research-agent-platform",
+            "stream": True,
+            "messages": [{"role": "user", "content": "PPT是什么？"}],
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert '"task_id": ""' in body
+    assert '"status": "idle"' in body
     assert "data: [DONE]" in body
 
 
@@ -89,6 +115,36 @@ def test_openai_compatible_chat_completion_handles_greeting_without_upstream_cal
     payload = response.json()
     assert payload["choices"][0]["message"]["role"] == "assistant"
     assert "科研智能体" in payload["choices"][0]["message"]["content"]
+
+
+def test_openai_compatible_base_path_has_discovery_response(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    client = TestClient(api_module.app)
+
+    response = client.get("/v1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["base_path"] == "/v1"
+    assert "/v1/chat/completions" in payload["endpoints"]
+
+
+def test_openai_text_chat_adds_one_time_intro_and_hides_server_path(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+    client = TestClient(api_module.app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "你好"}]},
+    )
+
+    assert response.status_code == 200
+    content = response.json()["choices"][0]["message"]["content"]
+    assert "你好，我是科研智能体 Research Agent" in content
+    assert content.count("你好，我是科研智能体 Research Agent") == 1
+    assert "/v1" not in content or "工作区" in content
+    assert "/agent-workspace/" not in content
+    assert response.json()["x_agent_task"]["artifact_root"] == ""
 
 
 def test_openai_compatible_endpoints_require_public_api_key_when_configured(

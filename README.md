@@ -15,8 +15,8 @@ Research agent platform aligned to the PRD and tech spec, grounded by the vendor
 ## Run
 
 ```bash
-uv sync --no-editable --project J:\Desktop\科研agent\research-agent-platform
-uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-dir src research_agent_platform.api:app --host 127.0.0.1 --port 8000
+uv sync --no-editable
+uv run uvicorn --app-dir src research_agent_platform.api:app --host 127.0.0.1 --port 8000
 ```
 
 ## OpenAI-compatible API
@@ -38,24 +38,22 @@ uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-di
 
 ## Research workflow commands
 
-- `/review` first writes a reproducible query protocol, then runs multi-query scholarly retrieval, relevance filtering, DOI/arXiv/title de-duplication, and a traceability gate. Formal synthesis requires at least 10 admitted external or relevant local sources; otherwise it stops after the search and quality report instead of inventing a review.
-- `/idea` generates candidate ideas, stress-tests novelty and feasibility, and writes the selected direction under `idea/FINAL_IDEA.md`. A single staged harness routes generation, criticism, and finalization to optional role-specific models. It may use targeted literature search but does not create the experiment plan.
+- `/review` is the literature-review workflow, not peer review. It first writes a clarified, reproducible query protocol, then runs multi-query scholarly retrieval, relevance filtering, DOI/arXiv/title de-duplication, and a traceability gate. `bib/QUERY_YIELD.json` records per-query retained-paper metrics and `bib/REVIEW_DIRECTIONS.md` exposes evidence-grounded direction facets. A request to “写综述” additionally produces a thematic review draft; otherwise it hands evidence to `/idea`, `/plan`, or `/write`. Formal synthesis requires at least 10 admitted external or relevant local sources; otherwise it stops after the search and quality report instead of inventing a review.
+- `/idea` generates candidate ideas, stress-tests novelty and feasibility, and writes the selected direction under `idea/FINAL_IDEA.md`. Wiki retrieval includes complete-paper coverage and a cross-paper evidence matrix. The deterministic novelty gate writes `Content/IDEA_NOVELTY_GATE.json` and marks insufficient evidence, direct Future Work, unsupported cross-paper differences, or missing falsifiability as `blocked_preliminary`; it does not create the experiment plan.
 - `/plan` turns `FINAL_IDEA` or a directly supplied research objective into `plan/RESEARCH_BLUEPRINT.md`, `plan/EXPERIMENT_PLAN.md`, and `plan/EXECUTION_CHECKLIST.md`.
 - `/write` freezes an attachment/session/workspace SourceSet, extracts stable evidence IDs, plans and drafts the paper, runs an independent self-review, produces an evidence-preserving revision, and writes deterministic citation/delivery reports before DOCX/PDF/TeX export.
-- `/rebuttal` requires both a completed paper and reviewer comments. It maps each comment to paper evidence, drafts point-by-point replies, produces a revised manuscript and revision ledger, then verifies comment-ID coverage in `REBUTTAL_CLOSURE_REPORT.json`.
-- `/code`, `/fig`, and `/present` continue implementation planning, figure production, and presentation generation. `/wiki` maintains one session-local research Wiki with original PDF copies, one Markdown summary per paper, a topic-focused retrieval pack, and minimal evidence-bearing relationship edges.
+- `/rebuttal` diagnoses an uploaded or generated manuscript when comments are absent; when reviewer comments are present, it maps each comment to paper evidence, drafts point-by-point replies, produces a revised manuscript and revision ledger, then verifies comment-ID coverage in `REBUTTAL_CLOSURE_REPORT.json`. Simulated peer review and deterministic pre-submission checks are internal stages; they are advisory quality controls, not journal decisions.
+- `/code`, `/fig`, `/present`, and `/wiki` continue implementation planning, figure production, presentation generation, and persistent research memory. `/fig` freezes a FigureContract, builds a LayoutPlan, measures real text, and uses ELK before creating one shared DiagramRenderSpec. Data plots use reproducible Python; non-data figures default to editable Academic SVG; explicit structural editing uses native Draw.io; reference-image decomposition uses the optional Edit Banana sidecar. Every completed route emits SVG/PDF/PNG plus QA and a v3 delivery manifest.
 
 Each command can run independently. When prior `/review` or `/idea` tasks exist in the same session, downstream commands prioritize their evidence map, research gaps, final idea, and research contract as handoff context.
-
-Uploaded PDFs remain in their original `paper/uploads/` or `bib/papers/` paths for compatibility. When `/wiki` or `/idea` uses them, the platform also creates `wiki/papers/<paper_id>/source.pdf` and `wiki/papers/<paper_id>/summary.md`. Re-importing the same PDF content reuses the same stable paper id. `wiki/index.md` lists admitted papers, `wiki/query_pack.md` is the compact retrieval input for Idea stages, and `wiki/relations.jsonl` currently records minimal `idea_based_on` edges. The platform does not require a graph database.
-
-`/idea` keeps its existing delivery paths: `idea/IDEA_CANDIDATES.md`, `idea/IDEA_VERIFICATION.md`, `idea/FINAL_IDEA.md`, and `idea/docs/research_contract.md`. `Content/IDEA_TRACE.json` additionally records stage model roles, selected models, fallback use, latency, and evidence-id validation. The completed Idea is written back to `wiki/ideas/<task_id>.md` without replacing `/plan`.
 
 `/review` uses relevant files under `*/uploads/` as local literature, then queries OpenAlex, Semantic Scholar, and arXiv with the brief's 4-6 Chinese/English topic variants; configured Web of Science and CNKI sources are added automatically. Admitted records receive stable IDs such as `[P001]`. When a provider exposes an explicit public PDF URL, the agent downloads and validates it into `bib/papers/`, subject to `REVIEW_DOWNLOAD_LIMIT`, `REVIEW_DOWNLOAD_MAX_MB`, and `REVIEW_DOWNLOAD_TIMEOUT_SECONDS`; `bib/LITERATURE_DOWNLOADS.json` records downloaded, unavailable, skipped, and failed items. A provider outage or unavailable full text is reported as a coverage limitation, never interpreted as a research gap, and no paywall is bypassed.
 
 When a public PDF cannot be downloaded, `/review` also writes `bib/INSTITUTIONAL_ACCESS.md` and `bib/INSTITUTIONAL_ACCESS.json` with Tsinghua library gateway / off-campus access handoff links. Users must log in with their own institutional account. After downloading authorized PDFs, upload them with `target=bib`; PDF uploads to that target are stored in `bib/papers/` and can be reused by later `/review` runs as local literature.
 
-For `/rebuttal`, upload the completed paper and reviewer comments in the same session. Reviewer files whose names contain `review`, `reviewer`, `审稿`, or `评审` are routed to `rebuttal/uploads/`; paper files remain under `paper/uploads/`. Missing either input fails validation before model generation. Explicit `--paper` and `--review` paths can override automatic selection; workspace fallback accepts only filenames clearly marked as final/accepted/终稿/定稿.
+Wiki reference expansion is disabled by default. Set `WIKI_REFERENCE_EXPANSION_ENABLED=true` only when direct-reference ingestion is intended. The opt-in path rejects loopback/private/link-local destinations after every redirect and enforces `WIKI_REFERENCE_SOURCE_LIMIT`, `WIKI_REFERENCE_LIMIT`, `WIKI_REFERENCE_DOWNLOAD_LIMIT`, `WIKI_REFERENCE_MAX_PDF_MB`, and `WIKI_REFERENCE_MAX_TOTAL_MB`. Metadata-only or failed references never count as full-text evidence.
+
+For `/rebuttal`, upload the completed paper and optionally reviewer comments in the same session. Reviewer files whose names contain `review`, `reviewer`, `审稿`, or `评审` are routed to `rebuttal/uploads/`; paper files remain under `paper/uploads/`. With comments, the workflow performs point-by-point rebuttal and revision; without comments, it runs an advisory manuscript diagnosis. Explicit `--paper` and `--review` paths can override automatic selection; workspace fallback accepts only filenames clearly marked as final/accepted/终稿/定稿.
 
 For `/write`, `--source attachments|selected|session|workspace` is optional. Automatic mode combines the latest upload batch with ranked paper, figure, plan, idea, bibliography, context, log, and code materials. `Content/PAPER_SOURCE_SELECTION.json` freezes the boundary; `paper/PAPER_EVIDENCE_MAP.json` stores extracted source/page/provenance records. The final exports use `paper/PAPER_REVISED.md`, not the first draft.
 
@@ -119,8 +117,8 @@ This implementation is a one-way incremental mirror from local workspace to Seaf
 ## Deploy
 
 ```bash
-uv sync --no-editable --project J:\Desktop\科研agent\research-agent-platform
-uv run --project J:\Desktop\科研agent\research-agent-platform uvicorn --app-dir src research_agent_platform.api:app --host 0.0.0.0 --port 8000
+uv sync --no-editable
+uv run uvicorn --app-dir src research_agent_platform.api:app --host 0.0.0.0 --port 8000
 ```
 
 ## OpenAI SDK
@@ -148,7 +146,6 @@ Set `ARIS_REPO_ROOT` in `.env` only if you intentionally want to override the bu
 
 - If your relay exposes many model ids, set `UPSTREAM_MODEL` explicitly.
 - If `UPSTREAM_MODEL` is empty, the platform now prefers chat-capable models such as `gpt-5.4-mini` instead of taking the first returned model blindly.
-- `IDEA_GENERATOR_MODEL`, `IDEA_CRITIC_MODEL`, and `IDEA_FINAL_MODEL` optionally route the three `/idea` stages to different models. Empty role settings fall back to `UPSTREAM_MODEL`, so one-model deployments require no additional configuration.
-- A practical fast-quality profile is `GLM-5.2 -> DeepSeek-V4-Pro -> GLM-5.2` after confirming those names in the provider's `/v1/models` response. `Kimi-K2.6` can be used for deeper candidate generation, but real tests showed substantially higher and more variable latency.
-- If a configured Idea-stage model fails and `UPSTREAM_MODEL` is available, the stage retries once with the default model and records the fallback in `Content/IDEA_TRACE.json`.
-- `/fig` uses `IMAGE_MODEL`, which defaults to `gpt-image-2`.
+- Set `UPSTREAM_REVIEW_MODEL` to route isolated reviewer and meta-review calls separately. Reviewer failures are recorded as `needs_attention`/`REVIEW_UNAVAILABLE`, never converted into an empty clean review.
+- `/fig` uses `IMAGE_MODEL`, which defaults to `gpt-image-2`, only for one optional text-free moodboard on mechanism/reference routes. Image generation is never the canonical source for labels, arrows, or scientific structure.
+- Run `npm ci` to enable the locked ELK layout engine; the figure pipeline uses a deterministic grid fallback when Node/ELK is unavailable.

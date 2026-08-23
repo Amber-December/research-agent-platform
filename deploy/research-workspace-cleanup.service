@@ -1,0 +1,9 @@
+[Unit]
+Description=Remove stale Research Agent session workspaces
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Deliberately scoped to this platform only. Do not add roots owned by other
+# applications: those projects must manage their own retention policy.
+ExecStart=/opt/apps/research-agent-platform/.venv/bin/python /opt/apps/research-agent-platform/deploy/cleanup_stale_workspaces.py --root /opt/apps/research-agent-platform/agent-workspace/local --ttl-hours 168

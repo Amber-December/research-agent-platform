@@ -1,0 +1,122 @@
+{
+  "schema_version": "writing-length-profiles/v1",
+  "precedence": [
+    "explicit user word or character limit",
+    "verified target-venue instructions",
+    "document-specific author constraints",
+    "profile fallback"
+  ],
+  "profiles": {
+    "research_article": {
+      "label": "Research article",
+      "default_total": "4000–8000 words",
+      "sections": [
+        {"name": "Abstract", "budget": "150–300 words"},
+        {"name": "Introduction", "budget": "10–15%"},
+        {"name": "Methods", "budget": "20–30%"},
+        {"name": "Results", "budget": "25–35%"},
+        {"name": "Discussion", "budget": "20–30%"},
+        {"name": "Conclusion", "budget": "3–8%"}
+      ],
+      "architecture": "Use IMRaD only when it fits the study and target venue."
+    },
+    "literature_review": {
+      "label": "Literature review",
+      "default_total": "6000–12000 words",
+      "sections": [
+        {"name": "Abstract", "budget": "8–10%"},
+        {"name": "Introduction", "budget": "10–15%"},
+        {"name": "Review scope and approach", "budget": "6–10%"},
+        {"name": "Thematic synthesis", "budget": "50–60%"},
+        {"name": "Discussion", "budget": "15–20%"},
+        {"name": "Conclusion", "budget": "5–7%"}
+      ],
+      "architecture": "Use a formal review-article structure. Do not force IMRAD for a narrative review; keep evidence matrices and retrieval audits outside the main manuscript unless the requested review type and venue require them."
+    },
+    "chinese_literature_review": {
+      "label": "Chinese literature review",
+      "default_total": "8000–20000 characters",
+      "sections": [
+        {"name": "摘要", "budget": "300–500 characters"},
+        {"name": "引言", "budget": "10–15%"},
+        {"name": "综述范围与方法", "budget": "6–10%"},
+        {"name": "主题综合", "budget": "50–60%"},
+        {"name": "讨论", "budget": "15–20%"},
+        {"name": "结论", "budget": "5–7%"}
+      ],
+      "architecture": "采用正式中文综述文章结构；以目标期刊规范为准。证据矩阵、检索记录和引用审计是独立附件，不作为正文固定章节。"
+    },
+    "systematic_review": {
+      "label": "Systematic review",
+      "default_total": "5000–10000 words",
+      "sections": [
+        {"name": "Abstract", "budget": "200–350 words"},
+        {"name": "Introduction", "budget": "8–12%"},
+        {"name": "Search, screening, and synthesis methods", "budget": "20–30%"},
+        {"name": "Results and evidence synthesis", "budget": "35–45%"},
+        {"name": "Discussion, bias, and limitations", "budget": "20–30%"},
+        {"name": "Conclusion", "budget": "3–6%"}
+      ],
+      "architecture": "Follow the applicable reporting standard and preserve search, screening, risk-of-bias, and exclusion traceability."
+    },
+    "short_communication": {
+      "label": "Short communication",
+      "default_total": "1500–3500 words",
+      "sections": [
+        {"name": "Abstract", "budget": "100–200 words"},
+        {"name": "Introduction", "budget": "10–15%"},
+        {"name": "Methods and results", "budget": "55–65%"},
+        {"name": "Discussion and conclusion", "budget": "20–30%"}
+      ],
+      "architecture": "Compress background before evidence and preserve all conditions needed to judge the result."
+    },
+    "perspective_commentary": {
+      "label": "Perspective / commentary",
+      "default_total": "1500–4000 words",
+      "sections": [
+        {"name": "Opening claim and context", "budget": "15–20%"},
+        {"name": "Evidence-led argument", "budget": "55–65%"},
+        {"name": "Counterarguments and limits", "budget": "10–15%"},
+        {"name": "Implications", "budget": "10–15%"}
+      ],
+      "architecture": "Organize around a bounded thesis, not a miniature IMRaD article."
+    },
+    "methods_protocol_resource": {
+      "label": "Methods / protocol / resource article",
+      "default_total": "4000–8000 words",
+      "sections": [
+        {"name": "Abstract", "budget": "150–300 words"},
+        {"name": "Use case and design rationale", "budget": "10–15%"},
+        {"name": "Method, protocol, or resource specification", "budget": "45–55%"},
+        {"name": "Validation and limitations", "budget": "25–35%"},
+        {"name": "Reuse guidance", "budget": "5–10%"}
+      ],
+      "architecture": "Prioritize reproducibility, prerequisites, validation, and reuse boundaries."
+    },
+    "chinese_journal_article": {
+      "label": "Chinese journal article",
+      "default_total": "6000–12000 characters",
+      "sections": [
+        {"name": "摘要", "budget": "300–500 characters"},
+        {"name": "引言", "budget": "10–15%"},
+        {"name": "方法或理论框架", "budget": "20–30%"},
+        {"name": "结果或分析", "budget": "30–40%"},
+        {"name": "讨论与结论", "budget": "20–30%"}
+      ],
+      "architecture": "按学科和期刊惯例调整，不为满足字数重复背景。"
+    },
+    "degree_thesis": {
+      "label": "Degree thesis",
+      "default_total": "institution-specific; budget by chapter before drafting",
+      "sections": [
+        {"name": "Thesis abstract", "budget": "800–1500 characters"},
+        {"name": "Introduction and research questions", "budget": "8–12%"},
+        {"name": "Literature and theoretical framing", "budget": "12–20%"},
+        {"name": "Methods / materials", "budget": "15–25%"},
+        {"name": "Empirical or analytical chapters", "budget": "35–50%"},
+        {"name": "General discussion and conclusion", "budget": "10–18%"}
+      ],
+      "architecture": "Do not force IMRAD across the whole thesis; preserve institution rules and give every chapter a distinct research responsibility."
+    }
+  }
+}

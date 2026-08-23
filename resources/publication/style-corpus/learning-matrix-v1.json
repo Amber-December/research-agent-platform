@@ -1,0 +1,203 @@
+{
+  "schema_version": "style-corpus-learning-matrix/v1",
+  "scope": "Rules derived from curated and user-supplied lawful literature. They encode reusable rhetorical and evidence-reporting controls, never copied source prose.",
+  "rules": [
+    {
+      "id": "review-systematic-auditability",
+      "applies_to": [
+        "systematic_review"
+      ],
+      "source_ids": [
+        "EDU-04"
+      ],
+      "rule": "Frame explicit review questions before methods; then report search, screening, coding and synthesis in enough detail for the actual evidence package to be audited. Keep those methods proportional to what was actually done.",
+      "boundary": "Do not invent databases, dates, inter-rater reliability, flow counts or appraisal steps not present in the source package.",
+      "modules": [
+        "skills/paper-literature-review/SKILL.md",
+        "src/research_agent_platform/graphs/workflows.py"
+      ]
+    },
+    {
+      "id": "review-narrative-mechanism-to-action",
+      "applies_to": [
+        "literature_review"
+      ],
+      "source_ids": [
+        "MED-05",
+        "CS-03"
+      ],
+      "rule": "Organize a narrative review around substantive mechanisms, conditions, applications or unresolved controversies; move from what is established to what remains uncertain and the research action that uncertainty motivates.",
+      "boundary": "Do not turn a short or metadata-only corpus into a comprehensive field history.",
+      "modules": [
+        "skills/paper-literature-review/SKILL.md",
+        "resources/publication/exemplars/curated-patterns-v1.json"
+      ]
+    },
+    {
+      "id": "research-abstract-evidence-compression",
+      "applies_to": [
+        "research_article",
+        "degree_thesis"
+      ],
+      "source_ids": [
+        "MED-06",
+        "EDU-02"
+      ],
+      "rule": "Use the abstract to compress a complete argument: material problem, precise objective, approach, decisive observed or planned evidence, and bounded implication. Match tense to whether the work is complete or proposed.",
+      "boundary": "A plan-derived abstract uses prospective language and cannot report unobserved results.",
+      "modules": [
+        "skills/paper-draft/SKILL.md",
+        "resources/publication/length-profiles/article-section-lengths-v1.json"
+      ]
+    },
+    {
+      "id": "research-results-evidence-ladder",
+      "applies_to": [
+        "research_article"
+      ],
+      "source_ids": [
+        "MED-06",
+        "EDU-02"
+      ],
+      "rule": "Order results as a question or validation target, system or comparison condition, observation, quantitative or qualitative support, then a calibrated inference. Keep causal or mechanism claims separate from benchmark or descriptive findings.",
+      "boundary": "Do not imply statistical certainty, causal mechanism or generalization without the matching evidence.",
+      "modules": [
+        "skills/paper-draft/SKILL.md",
+        "resources/publication/styles/discipline-styles-v1.json"
+      ]
+    },
+    {
+      "id": "clinical-guideline-recommendation-grammar",
+      "applies_to": [
+        "medicine_clinical",
+        "clinical_guideline"
+      ],
+      "source_ids": [
+        "MED-01"
+      ],
+      "rule": "Present a clinical recommendation with its target population or condition, recommendation strength, certainty or quality of evidence, rationale, and applicability or resource boundary.",
+      "boundary": "Do not upgrade a weak recommendation, indirect evidence or a local guideline into universal clinical advice.",
+      "modules": [
+        "skills/paper-draft/SKILL.md",
+        "resources/publication/exemplars/curated-patterns-v1.json"
+      ]
+    },
+    {
+      "id": "normative-analysis-chain",
+      "applies_to": [
+        "law_legal",
+        "arts_humanities",
+        "social_science"
+      ],
+      "source_ids": [
+        "LAW-01",
+        "LAW-03",
+        "HUM-03"
+      ],
+      "rule": "Make the normative chain explicit: object or institutional setting, documented concern, stated evaluative premise, analysis or classification, stakeholder-specific implication, and a feasible recommendation.",
+      "boundary": "Do not present a value judgment as an empirical finding or erase disagreement among authorities, frameworks or affected groups.",
+      "modules": [
+        "skills/paper-draft/SKILL.md",
+        "skills/paper-literature-review/SKILL.md",
+        "resources/publication/styles/discipline-styles-v1.json"
+      ]
+    },
+    {
+      "id": "policy-perspective-actionability",
+      "applies_to": [
+        "perspective_commentary",
+        "social_science",
+        "education"
+      ],
+      "source_ids": [
+        "PSY-03",
+        "LAW-03"
+      ],
+      "rule": "For a perspective or policy-facing article, connect each recommendation to the behavioral, institutional or evidentiary insight that justifies it, name the actor responsible for action, and state implementation conditions.",
+      "boundary": "Do not use a list of recommendations as a substitute for a traceable argument.",
+      "modules": [
+        "skills/paper-draft/SKILL.md",
+        "resources/publication/length-profiles/article-section-lengths-v1.json"
+      ]
+    },
+    {
+      "id": "reader-first-ccc-paragraphs",
+      "applies_to": [
+        "all"
+      ],
+      "source_ids": [
+        "WRT-01"
+      ],
+      "rule": "Use context, content and conclusion at article, section and paragraph scale. Give each paragraph one job, begin with the reader-relevant claim or question, and end with the implication or transition.",
+      "boundary": "Do not mechanically force every paragraph into the same sentence count or replace disciplinary conventions with formulaic transitions.",
+      "modules": [
+        "skills/paper-draft/SKILL.md",
+        "skills/paper-revise/SKILL.md",
+        "src/research_agent_platform/paper_pipeline.py"
+      ]
+    },
+    {
+      "id": "bilingual-clarity-without-translationese",
+      "applies_to": [
+        "zh",
+        "en"
+      ],
+      "source_ids": [
+        "WRT-01",
+        "EDU-02",
+        "MED-05"
+      ],
+      "rule": "In English, place the concrete actor, condition and action near the main verb. In Chinese, use a clear topic, evidence or comparison, inference and boundary; remove empty transition phrases and translation-shaped clause stacking.",
+      "boundary": "Do not vary technical terminology merely for stylistic novelty; preserve the author's defined terms and citations.",
+      "modules": [
+        "skills/paper-draft/SKILL.md",
+        "skills/paper-revise/SKILL.md",
+        "resources/publication/styles/discipline-styles-v1.json"
+      ]
+    },
+    {
+      "applies_to": [
+        "social_science",
+        "zh"
+      ],
+      "rule": "Frame the real-world puzzle before defining constructs, measurement, and identification strategy; make the identification or model assumption explicit.",
+      "boundary": "Do not infer causality from descriptive association.",
+      "source_ids": [
+        "LOCAL-SOCIAL-01"
+      ]
+    },
+    {
+      "applies_to": [
+        "medicine_clinical",
+        "en"
+      ],
+      "rule": "State trial design and allocation, participant flow, outcomes, harms, and uncertainty explicitly; report randomisation and blinding where relevant.",
+      "boundary": "Do not imply efficacy beyond the registered design.",
+      "source_ids": [
+        "LOCAL-MED-01"
+      ]
+    },
+    {
+      "applies_to": [
+        "mathematics_theory",
+        "en"
+      ],
+      "rule": "Separate definitions, hypothesis conditions, hypotheses, lemmas, theorem statements, proof steps, and consequences; label any unproved lemma.",
+      "boundary": "Do not present an unproved claim as a theorem.",
+      "source_ids": [
+        "LOCAL-MATH-01"
+      ]
+    },
+    {
+      "applies_to": [
+        "chemistry_materials",
+        "en"
+      ],
+      "rule": "Distinguish ex situ characterization from operando evidence, describe the active state, and separate observation from mechanism.",
+      "boundary": "Do not infer operando mechanism from ex situ measurements alone.",
+      "source_ids": [
+        "LOCAL-MAT-01"
+      ]
+    }
+  ]
+}
