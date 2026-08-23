@@ -10,6 +10,7 @@ from research_agent_platform.models import UploadBatchRecord
 from research_agent_platform.paper_pipeline import (
     build_paper_quality_reports,
     collect_paper_evidence,
+    extract_inline_write_material,
     resolve_write_source_config,
     select_venue_profile,
 )
@@ -61,6 +62,37 @@ def test_collect_paper_evidence_assigns_stable_ids(tmp_path: Path):
     assert first == second
     assert first[0]["evidence_id"].startswith("PE-")
     assert first[0]["source_path"] == "plan/notes.md"
+
+
+def test_extract_inline_write_material_requires_an_explicit_material_payload():
+    material = extract_inline_write_material(
+        "请基于以下研究材料写一段引言：城市洪涝风险随极端降雨与高密度建设叠加而上升；"
+        "本研究结合居民避险行为调查和街区空间数据分析避险可达性差异。"
+    )
+
+    assert "城市洪涝风险" in material
+    assert extract_inline_write_material("请基于研究计划写一篇论文") == ""
+
+
+def test_write_materializes_explicit_inline_material_as_the_source_set(service: ResearchAgentService):
+    session = service.store.create_session()
+    task = service._create_task
+    # The public workflow exercises this path asynchronously; this focused test
+    # checks the source contract without invoking the model.
+    from research_agent_platform.router.intent import RouteDecision
+
+    created = run(
+        task(
+            session,
+            "/write 请根据以下研究材料润色引言：城市洪涝风险正在上升；本研究结合居民避险行为调查和街区空间数据分析避险可达性差异。",
+            RouteDecision(command="/write", source="explicit", reason="test"),
+            sync_workspace=False,
+        )
+    )
+
+    assert created.write_source is not None
+    assert created.write_source.source_refs == ["Content/USER_PROVIDED_MATERIAL.md"]
+    assert Path(created.artifact_root, "Content", "USER_PROVIDED_MATERIAL.md").exists()
 
 
 def test_collect_paper_evidence_prioritizes_future_work_pages(tmp_path: Path, monkeypatch):

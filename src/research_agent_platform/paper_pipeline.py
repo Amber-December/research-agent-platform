@@ -55,6 +55,58 @@ IGNORED_CONTEXT_FILES = {
 WORKSPACE_ORDER = ("paper", "figures", "plan", "idea", "bib", "Content", "logs", "code", "wiki")
 
 
+_INLINE_MATERIAL_MARKERS = (
+    "以下材料",
+    "研究材料",
+    "研究计划",
+    "研究方案",
+    "研究结果",
+    "实验结果",
+    "原文",
+    "稿件",
+    "草稿",
+    "数据如下",
+    "based on the following",
+    "research material",
+    "research plan",
+    "research results",
+    "manuscript text",
+    "draft text",
+)
+
+
+def extract_inline_write_material(objective: str) -> str:
+    """Return factual material pasted into a /write request, if it is explicit.
+
+    A writing request is not automatically evidence.  We only materialize text when
+    the user explicitly frames it as supplied material and provides a substantive
+    payload after a colon or on subsequent lines.  This lets short topic-only
+    requests continue through the literature-retrieval route while making pasted
+    plans, results, and manuscript passages first-class session evidence.
+    """
+    normalized = objective.strip()
+    if not normalized:
+        return ""
+    lowered = normalized.lower()
+    if not any(marker in lowered for marker in _INLINE_MATERIAL_MARKERS):
+        return ""
+
+    payload = ""
+    colon_match = re.search(r"[：:]\s*(.+)$", normalized, re.S)
+    if colon_match:
+        payload = colon_match.group(1).strip()
+    else:
+        lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+        if len(lines) > 1:
+            payload = "\n".join(lines[1:]).strip()
+
+    # Avoid treating a bare instruction such as "based on the research plan" as
+    # evidence.  A supplied payload must contain enough lexical content to be
+    # useful for a claim/evidence record.
+    payload = re.sub(r"^[-*]\s*", "", payload)
+    return payload if len(re.sub(r"\s+", "", payload)) >= 40 else ""
+
+
 def resolve_write_source_config(
     objective: str,
     workspace_root: Path,

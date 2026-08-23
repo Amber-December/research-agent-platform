@@ -43,6 +43,7 @@ from .models import (
 from .paper_pipeline import (
     build_paper_quality_reports,
     collect_paper_evidence,
+    extract_inline_write_material,
     paper_evidence_prompt,
     paper_evidence_to_json,
     resolve_write_source_config,
@@ -732,12 +733,35 @@ class ResearchAgentService:
                 source_limit=config.presentation_source_limit,
             )
         if task.command == "/write":
+            inline_material = extract_inline_write_material(task.objective)
+            if inline_material:
+                artifact = self._write_text(
+                    task,
+                    "Content/USER_PROVIDED_MATERIAL.md",
+                    "# User-provided writing material\n\n"
+                    "This file records factual material supplied directly in the current message. "
+                    "It is not an external publication and must not be cited as one.\n\n"
+                    "## Material\n\n"
+                    f"{inline_material}\n",
+                    kind="note",
+                    description="Writing material pasted directly by the user in the current request.",
+                )
+                self._upsert_task_artifact(task, artifact)
             task.write_source = resolve_write_source_config(
                 task.objective,
                 root,
                 session.upload_batches,
                 source_limit=config.write_source_limit,
             )
+            if inline_material:
+                # A directly supplied passage is the default source boundary for
+                # this request.  Older session files are only included when the
+                # user asks for them explicitly with a source-scope option.
+                task.write_source.source_refs = ["Content/USER_PROVIDED_MATERIAL.md"]
+                task.write_source.resolved_scope = "selected"
+                task.write_source.selection_reason = (
+                    "用户在当前消息中直接提供了可追溯的写作材料；本次仅以该材料作为事实边界。"
+                )
         if task.command == "/download":
             task.download_source = resolve_download_source_config(
                 task.objective,
